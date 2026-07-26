@@ -405,6 +405,10 @@ def metrics(_: Protected) -> str:
         "# TYPE cfwarp_probe_scenario_fresh_seconds gauge",
         "# HELP cfwarp_probe_lane_warp_on Latest heartbeat reported warp=on for this lane.",
         "# TYPE cfwarp_probe_lane_warp_on gauge",
+        "# HELP cfwarp_probe_lane_throughput_mibps Newest sampled lane throughput.",
+        "# TYPE cfwarp_probe_lane_throughput_mibps gauge",
+        "# HELP cfwarp_probe_lane_performance_band Lane performance band, 1 for the active band.",
+        "# TYPE cfwarp_probe_lane_performance_band gauge",
     ]
     for lane_id, lane in runtime.lanes.items():
         tier = runtime.store.lane_tier(lane_id)
@@ -428,6 +432,18 @@ def metrics(_: Protected) -> str:
         if latest is not None:
             warp_on = 1 if latest.get("warp") == "on" else 0
             lines.append(f"cfwarp_probe_lane_warp_on{{{common}}} {warp_on}")
+        throughput = tier.get("throughput_mibps")
+        if throughput is not None:
+            lines.append(f"cfwarp_probe_lane_throughput_mibps{{{common}}} {throughput}")
+        # Emitted as one series per band so a dashboard can group lanes by
+        # band without string-matching a label value.
+        band = tier.get("performance_band")
+        if band is not None:
+            for name in ("fast", "moderate", "slow"):
+                lines.append(
+                    f'cfwarp_probe_lane_performance_band{{{common},band="{name}"}} '
+                    f"{1 if band == name else 0}"
+                )
         for scenario_id, record in runtime.store.latest_by_scenario(lane_id).items():
             result = record["payload"].get("result") or {}
             label = f'{common},scenario="{escape_label(scenario_id)}"'

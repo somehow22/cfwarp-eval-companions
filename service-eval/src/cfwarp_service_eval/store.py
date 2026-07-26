@@ -33,6 +33,21 @@ HEARTBEAT_WINDOW_HOURS = 1
 # quarantine a lane.
 MIN_HEARTBEAT_SAMPLES = 5
 
+# Performance bands, in MiB/s. Banding is not gating: a substrate lane is never
+# failed on throughput, because its speed is the provider's property. But a
+# consumer routing on tier must be able to tell 19 MiB/s from 0.8 MiB/s, and
+# without this the tier is silent about a 10-20x difference across the fleet.
+PERFORMANCE_BANDS = ((10.0, "fast"), (2.0, "moderate"), (0.0, "slow"))
+
+
+def performance_band(throughput_mibps: float | None) -> str | None:
+    if throughput_mibps is None:
+        return None
+    for floor, name in PERFORMANCE_BANDS:
+        if throughput_mibps >= floor:
+            return name
+    return "slow"
+
 
 class Store:
     def __init__(self, path: Path, max_pending_groups: int = MAX_PENDING_GROUPS):
@@ -333,6 +348,7 @@ class Store:
 
         perf = scenarios.get("perf", {}).get("payload", {}).get("perf") or {}
         meets_floor = perf.get("meets_floor")
+        throughput = perf.get("throughput_mibps")
 
         ratio = heartbeat["ok_ratio"]
         # Treat a thin sample as no signal rather than a bad one.
@@ -371,6 +387,8 @@ class Store:
             "stale_scenarios": sorted(stale),
             "unavailable_scenarios": sorted(unavailable),
             "meets_throughput_floor": meets_floor,
+            "throughput_mibps": throughput,
+            "performance_band": performance_band(throughput),
         }
 
     def prune(self, artifact_root: Path, retention_days: int, max_bytes: int) -> None:

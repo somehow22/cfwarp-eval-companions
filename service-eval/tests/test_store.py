@@ -217,3 +217,32 @@ def test_a_recovered_lane_is_not_held_down_by_old_failures(tmp_path):
     record(store, "direct-de", "youtube", "available")
     tier = store.lane_tier("direct-de")
     assert tier["tier"] == "preferred", tier["reason"]
+
+
+def test_performance_band_reflects_measured_throughput(tmp_path):
+    from cfwarp_service_eval.store import performance_band
+
+    assert performance_band(19.7) == "fast"
+    assert performance_band(13.5) == "fast"
+    assert performance_band(5.0) == "moderate"
+    assert performance_band(0.78) == "slow"
+    assert performance_band(None) is None
+
+
+def test_a_slow_substrate_lane_is_banded_but_never_failed(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    beat(store, "sub-lane", True, count=10)
+    record(store, "sub-lane", "youtube", "available")
+    # Substrate lanes carry no floor, so meets_floor is None and the lane passes.
+    record(
+        store,
+        "sub-lane",
+        "perf",
+        "available",
+        extra={"perf": {"throughput_mibps": 0.78, "meets_floor": None}},
+    )
+    tier = store.lane_tier("sub-lane")
+    assert tier["performance_band"] == "slow"
+    assert tier["throughput_mibps"] == 0.78
+    # Banding must not demote the lane: it is not a gate.
+    assert tier["tier"] == "preferred"
