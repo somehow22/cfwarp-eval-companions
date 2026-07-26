@@ -24,6 +24,15 @@ QUARANTINE_HEARTBEAT_RATIO = 0.2
 DEGRADED_HEARTBEAT_RATIO = 0.8
 TIER_WINDOW_HOURS = 24 * 14
 
+# Liveness tiering reads a short recent window, not the full availability
+# window. Over 14 days a lane that has recovered stays demoted for days because
+# old failures still dominate the ratio, which makes the routing signal wrong in
+# the one direction that matters: it hides a lane that works.
+HEARTBEAT_WINDOW_HOURS = 1
+# Below this many samples the ratio is noise. One failed beat must not
+# quarantine a lane.
+MIN_HEARTBEAT_SAMPLES = 5
+
 
 class Store:
     def __init__(self, path: Path, max_pending_groups: int = MAX_PENDING_GROUPS):
@@ -309,7 +318,7 @@ class Store:
         are currently unavailable.
         """
         now = datetime.now(timezone.utc)
-        heartbeat = self.heartbeat_stats(lane_id, window_hours)
+        heartbeat = self.heartbeat_stats(lane_id, HEARTBEAT_WINDOW_HOURS)
         scenarios = self.latest_by_scenario(lane_id)
 
         fresh, stale, unavailable = [], [], []
@@ -326,6 +335,9 @@ class Store:
         meets_floor = perf.get("meets_floor")
 
         ratio = heartbeat["ok_ratio"]
+        # Treat a thin sample as no signal rather than a bad one.
+        if heartbeat["samples"] < MIN_HEARTBEAT_SAMPLES:
+            ratio = None
         reason = ""
         if ratio is None and not fresh:
             tier, reason = "unknown", "no heartbeat samples and no fresh observations"

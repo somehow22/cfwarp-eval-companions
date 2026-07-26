@@ -197,3 +197,23 @@ def test_retention_removes_oldest_completed_group_and_artifacts(tmp_path):
     with pytest.raises(KeyError):
         store.group(group["id"])
     assert not (artifact_root / group["id"]).exists()
+
+
+def test_one_failed_beat_does_not_quarantine_a_lane(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    beat(store, "direct-de", False, count=1)
+    record(store, "direct-de", "youtube", "available")
+    # A single sample is noise, not evidence of sustained failure.
+    assert store.lane_tier("direct-de")["tier"] != "quarantined"
+
+
+def test_a_recovered_lane_is_not_held_down_by_old_failures(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    beat(store, "direct-de", False, count=40)
+    old = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    with store.db:
+        store.db.execute("UPDATE heartbeats SET observed_at=?", (old,))
+    beat(store, "direct-de", True, count=10)
+    record(store, "direct-de", "youtube", "available")
+    tier = store.lane_tier("direct-de")
+    assert tier["tier"] == "preferred", tier["reason"]
