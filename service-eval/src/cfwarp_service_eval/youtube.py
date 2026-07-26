@@ -75,6 +75,9 @@ class YouTubeConfig:
     requested_region: str | None = None
 
 
+IN_FLIGHT: dict[str, Any] = {}
+
+
 class ProbeDeadlineExceeded(BaseException):
     pass
 
@@ -388,6 +391,7 @@ def run_probe(config: YouTubeConfig) -> tuple[dict[str, Any], int]:
         return _run_probe(config)
 
     deadline_started_at = datetime.now(timezone.utc).isoformat()
+    IN_FLIGHT.pop("summary", None)
     previous_handler = signal.getsignal(signal.SIGALRM)
 
     def deadline_handler(_signum: int, _frame: Any) -> None:
@@ -399,7 +403,7 @@ def run_probe(config: YouTubeConfig) -> tuple[dict[str, Any], int]:
         return _run_probe(config)
     except ProbeDeadlineExceeded:
         config.output.mkdir(parents=True, exist_ok=True)
-        summary: dict[str, Any] = {
+        summary = IN_FLIGHT.get("summary") or {
             "schema_version": 1,
             "service": "youtube",
             "scenario": "anonymous_public_video",
@@ -411,13 +415,30 @@ def run_probe(config: YouTubeConfig) -> tuple[dict[str, Any], int]:
             "tooling_ready": False,
             "trace": None,
             "attempts": [],
-            "verdict": "probe_deadline_exceeded",
-            "failure_layer": "unknown",
         }
+        summary["verdict"], summary["failure_layer"] = deadline_verdict(summary)
         return finish(config.output, summary), 2
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
+
+
+def deadline_verdict(summary: dict[str, Any]) -> tuple[str, str]:
+    """Classify a deadline expiry using whatever the probe already observed.
+
+    A transfer that reached the media host and failed at the transport is a
+    lane verdict, not a measurement gap. Reporting it as a deadline expiry
+    makes it ineligible for the availability ratio, which hides a lane that
+    reproducibly does not work behind an apparent gap in coverage.
+    """
+    for attempt in summary.get("attempts") or []:
+        transfer = attempt.get("partial_transfer") or {}
+        if transfer.get("ok") is False and transfer.get("error_kind") in {
+            "transport_error",
+            "timeout",
+        }:
+            return "network_failure", "service-probe"
+    return "probe_deadline_exceeded", "unknown"
 
 
 def safe_input(config: YouTubeConfig) -> dict[str, Any]:
@@ -473,6 +494,11 @@ def _run_probe(config: YouTubeConfig) -> tuple[dict[str, Any], int]:
         "verdict": "unknown",
         "failure_layer": "unknown",
     }
+    # Published so the deadline handler can salvage partial evidence. A lane
+    # slow enough to exhaust the deadline is usually a lane that already failed
+    # visibly; discarding what it showed turns a lane verdict into a
+    # measurement gap.
+    IN_FLIGHT["summary"] = summary
 
     trace, trace_ok = check_trace(config)
     summary["trace"] = trace

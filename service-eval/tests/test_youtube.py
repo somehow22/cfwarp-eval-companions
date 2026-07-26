@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import json
 import time
 from pathlib import Path
@@ -282,3 +283,46 @@ def test_probe_has_a_hard_deadline(tmp_path: Path, monkeypatch) -> None:
         "eligible": False,
     }
     assert (tmp_path / "summary.json").is_file()
+
+
+def test_deadline_with_transport_failure_is_an_eligible_lane_verdict():
+    """A lane that visibly failed a transfer must not read as a measurement gap."""
+    from cfwarp_service_eval.youtube import build_observation, deadline_verdict
+
+    summary = {
+        "attempts": [
+            {
+                "number": 1,
+                "partial_transfer": {
+                    "ok": False,
+                    "bytes_read": 0,
+                    "error_kind": "transport_error",
+                    "error_type": "ProxyError",
+                },
+            }
+        ]
+    }
+    verdict, layer = deadline_verdict(summary)
+    assert verdict == "network_failure"
+    assert layer == "service-probe"
+
+    summary.update(
+        {
+            "verdict": verdict,
+            "failure_layer": layer,
+            "elapsed_ms": 1,
+            "trace": {},
+            "input": {},
+        }
+    )
+    observation = build_observation(summary, datetime.now(timezone.utc))
+    assert observation["result"]["availability"] == "unavailable"
+    assert observation["result"]["eligible"] is True
+
+
+def test_deadline_without_evidence_stays_ineligible():
+    """With nothing observed, a deadline really is a measurement gap."""
+    from cfwarp_service_eval.youtube import deadline_verdict
+
+    assert deadline_verdict({"attempts": []}) == ("probe_deadline_exceeded", "unknown")
+    assert deadline_verdict({}) == ("probe_deadline_exceeded", "unknown")
