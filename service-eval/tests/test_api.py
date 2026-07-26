@@ -213,3 +213,32 @@ def test_warp_state_is_distinguishable_from_unreachability(tmp_path, monkeypatch
         assert len(series) == 1
         assert series[0].endswith(" 0")
         assert 'lane="direct-de"' in series[0]
+
+
+def test_node_scenario_allowlist_restricts_scheduling_and_api(tmp_path, monkeypatch):
+    # A memory-constrained node must not schedule browser scenarios at all,
+    # rather than scheduling and failing them as tooling errors.
+    monkeypatch.setenv("SERVICE_EVAL_SCENARIOS", "perf,youtube")
+    with client(tmp_path, monkeypatch) as test_client:
+        listed = {
+            row["id"] for row in test_client.get("/v1/scenarios", headers=auth()).json()
+        }
+        assert listed == {"perf", "youtube"}
+        assert sorted(api.runtime.due_scenarios("direct-de")) == ["perf", "youtube"]
+        rejected = test_client.post(
+            "/v1/run-groups",
+            headers=auth(),
+            json={"lane_ids": ["direct-de"], "scenario_ids": ["chatgpt"]},
+        )
+        assert rejected.status_code == 422
+        assert "not enabled on this node" in rejected.json()["detail"]
+
+
+def test_unknown_scenario_in_the_allowlist_is_rejected_at_startup(tmp_path):
+    import pytest
+
+    from cfwarp_service_eval.api import parse_scenarios
+
+    assert set(parse_scenarios(None)) == set(api.SCENARIOS)
+    with pytest.raises(ValueError, match="unknown scenario IDs"):
+        parse_scenarios("perf,not-a-scenario")

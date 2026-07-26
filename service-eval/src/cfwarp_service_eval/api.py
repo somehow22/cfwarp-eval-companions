@@ -36,6 +36,17 @@ def env_int(name: str, default: int) -> int:
     return int(os.environ.get(name, str(default)))
 
 
+def parse_scenarios(raw: str | None) -> dict[str, str]:
+    """Resolve the node's enabled scenario set, defaulting to all of them."""
+    if not raw or not raw.strip():
+        return dict(SCENARIOS)
+    selected = [item.strip() for item in raw.split(",") if item.strip()]
+    unknown = sorted(set(selected) - set(SCENARIOS))
+    if unknown:
+        raise ValueError(f"unknown scenario IDs in SERVICE_EVAL_SCENARIOS: {unknown}")
+    return {key: SCENARIOS[key] for key in selected}
+
+
 def env_flag(name: str, default: bool = True) -> bool:
     return os.environ.get(name, "1" if default else "0").lower() not in {
         "0",
@@ -89,6 +100,12 @@ class Runtime:
         self.lane_chunk = env_int("SERVICE_EVAL_LANE_CHUNK", 5)
         self.heartbeat_enabled = env_flag("SERVICE_EVAL_HEARTBEAT_ENABLED")
         self.scheduler_enabled = env_flag("SERVICE_EVAL_SCHEDULER_ENABLED")
+        # Not every node can run every scenario. The browser scenarios spawn
+        # Chromium, which a memory-constrained node cannot host without
+        # evicting the very lanes it is meant to observe. Restricting the set
+        # keeps those attempts from being scheduled at all, rather than letting
+        # them fail and pollute evaluation completeness with tooling errors.
+        self.scenarios = parse_scenarios(os.environ.get("SERVICE_EVAL_SCENARIOS"))
         self.wakeup = asyncio.Event()
         self.stop = asyncio.Event()
         self.tasks: list[asyncio.Task[None]] = []
@@ -148,7 +165,7 @@ class Runtime:
         )
         latest = self.store.latest_by_scenario(lane_id)
         due = []
-        for scenario_id in SCENARIOS:
+        for scenario_id in self.scenarios:
             record = latest.get(scenario_id)
             if record is None:
                 due.append(scenario_id)
@@ -281,9 +298,11 @@ def healthz() -> dict[str, str]:
 
 @app.get("/v1/scenarios")
 def scenarios(_: Protected) -> list[dict[str, str]]:
+    """Only the scenarios this node is configured to run."""
+    assert runtime
     return [
         {"id": key, "observation_scenario_id": value}
-        for key, value in SCENARIOS.items()
+        for key, value in runtime.scenarios.items()
     ]
 
 
@@ -306,8 +325,10 @@ def create_group(body: RunGroupRequest, _: Protected) -> dict[str, Any]:
     assert runtime
     if unknown := set(body.lane_ids) - set(runtime.lanes):
         raise HTTPException(422, f"unknown lane IDs: {sorted(unknown)}")
-    if unknown := set(body.scenario_ids) - set(SCENARIOS):
-        raise HTTPException(422, f"unknown scenario IDs: {sorted(unknown)}")
+    if unknown := set(body.scenario_ids) - set(runtime.scenarios):
+        raise HTTPException(
+            422, f"scenario IDs not enabled on this node: {sorted(unknown)}"
+        )
     try:
         group = runtime.store.create_group(body.lane_ids, body.scenario_ids)
     except QueueFull as error:
@@ -345,7 +366,7 @@ def observations(
     assert runtime
     if lane is not None and lane not in runtime.lanes:
         raise HTTPException(422, "unknown lane ID")
-    if scenario is not None and scenario not in SCENARIOS:
+    if scenario is not None and scenario not in runtime.scenarios:
         raise HTTPException(422, "unknown scenario ID")
     for value in (since, until):
         if value:
