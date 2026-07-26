@@ -382,6 +382,8 @@ def metrics(_: Protected) -> str:
         "# TYPE cfwarp_probe_scenario_available gauge",
         "# HELP cfwarp_probe_scenario_fresh_seconds Seconds until the newest observation expires.",
         "# TYPE cfwarp_probe_scenario_fresh_seconds gauge",
+        "# HELP cfwarp_probe_lane_warp_on Latest heartbeat reported warp=on for this lane.",
+        "# TYPE cfwarp_probe_lane_warp_on gauge",
     ]
     for lane_id, lane in runtime.lanes.items():
         tier = runtime.store.lane_tier(lane_id)
@@ -397,6 +399,14 @@ def metrics(_: Protected) -> str:
         ratio = tier["heartbeat"]["ok_ratio"]
         if ratio is not None:
             lines.append(f"cfwarp_probe_heartbeat_ok_ratio{{{common}}} {ratio}")
+        # Emitted separately from the ok ratio on purpose. A lane serving
+        # traffic while reporting warp=off is a correctness failure, not a
+        # degradation, and it must be distinguishable from an unreachable
+        # lane rather than averaged into the same signal.
+        latest = tier["heartbeat"]["latest"]
+        if latest is not None:
+            warp_on = 1 if latest.get("warp") == "on" else 0
+            lines.append(f"cfwarp_probe_lane_warp_on{{{common}}} {warp_on}")
         for scenario_id, record in runtime.store.latest_by_scenario(lane_id).items():
             result = record["payload"].get("result") or {}
             label = f'{common},scenario="{escape_label(scenario_id)}"'

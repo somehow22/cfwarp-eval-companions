@@ -195,3 +195,21 @@ def test_unknown_lane_and_scenario_are_rejected(tmp_path, monkeypatch):
             ).status_code
             == 422
         )
+
+
+def test_warp_state_is_distinguishable_from_unreachability(tmp_path, monkeypatch):
+    with client(tmp_path, monkeypatch) as test_client:
+        store = api.runtime.store
+        store.record_heartbeat(
+            "direct-de", {"ok": False, "checks": {"trace": {"warp": "off"}}}
+        )
+        body = test_client.get("/metrics", headers=auth()).text
+        # A lane serving traffic off-WARP must not look like an unreachable one.
+        series = [
+            line
+            for line in body.splitlines()
+            if line.startswith("cfwarp_probe_lane_warp_on{")
+        ]
+        assert len(series) == 1
+        assert series[0].endswith(" 0")
+        assert 'lane="direct-de"' in series[0]
