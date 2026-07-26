@@ -1,0 +1,34 @@
+[project]
+name = "cfwarp-service-eval"
+version = "0.1.0"
+description = "Deterministic service verdict probes for cfwarp-pro"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "fastapi>=0.116.1,<1",
+  "httpx[socks]>=0.28.1,<1",
+  "pydantic-settings>=2.10.1,<3",
+  "uvicorn[standard]>=0.35.0,<1",
+  "yt-dlp[default]>=2026.7.4,<2027",
+]
+
+[project.scripts]
+cfwarp-service-eval = "cfwarp_service_eval.cli:main"
+cfwarp-service-eval-api = "cfwarp_service_eval.api:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.1,<9",
+  "ruff>=0.15.21,<0.16",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cfwarp_service_eval"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

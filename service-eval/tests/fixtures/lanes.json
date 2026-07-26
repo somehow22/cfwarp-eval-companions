@@ -1,0 +1,14 @@
+[
+  {
+    "id": "direct-de",
+    "proxy": "socks5h://proxy-host-1:16710",
+    "instance_id": "cfwarp-direct-de",
+    "node_id": "proxy-host-1",
+    "composition": "direct",
+    "transport": "wireguard",
+    "substrate_profile": null,
+    "requested_region": "DE",
+    "image_identity": "ghcr.io/example/cfwarp-pro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "config_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+]
