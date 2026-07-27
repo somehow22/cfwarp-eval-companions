@@ -302,6 +302,43 @@ class Store:
                 (utcnow(), task_id),
             )
 
+    def task_is_satisfied(self, task_id: int) -> bool:
+        """Whether newer evidence already satisfies this queued request.
+
+        A task queued at T may wait behind another group that completes the
+        same cell at T+1. Running the older queued copy would waste probe
+        capacity. Evidence from before T never satisfies an explicit request.
+        """
+        with self._lock:
+            row = self.db.execute(
+                """
+                SELECT g.created_at, max(o.observed_at) AS latest_observed_at
+                FROM tasks t
+                JOIN run_groups g ON g.id=t.group_id
+                LEFT JOIN observations o
+                  ON o.lane_id=t.lane_id AND o.scenario_id=t.scenario_id
+                WHERE t.id=?
+                GROUP BY g.created_at
+                """,
+                (task_id,),
+            ).fetchone()
+        return bool(
+            row
+            and row["latest_observed_at"]
+            and row["latest_observed_at"] > row["created_at"]
+        )
+
+    def supersede_task(self, task_id: int, reason: str) -> None:
+        with self._lock, self.db:
+            self.db.execute(
+                """
+                UPDATE tasks
+                SET status='superseded',finished_at=?,error=?
+                WHERE id=? AND status='queued'
+                """,
+                (utcnow(), reason[:300], task_id),
+            )
+
     def finish_task(
         self,
         task_id: int,

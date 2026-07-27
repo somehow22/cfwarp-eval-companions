@@ -140,6 +140,32 @@ def test_recovery_backfills_legacy_unknown_provenance_without_changing_result_ti
     assert repaired["lane"]["composition"] == "direct-warp"
 
 
+def test_queued_task_is_satisfied_only_by_observation_newer_than_its_group(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    old_group = store.create_group(["direct-de"], ["youtube"])
+    old_task = store.next_task(store.next_group()["id"])
+    store.finish_task(
+        old_task["id"],
+        old_group["id"],
+        "direct-de",
+        "youtube",
+        observation("youtube", "available"),
+    )
+    store.complete_group(old_group["id"])
+
+    new_group = store.create_group(["direct-de"], ["youtube"])
+    new_task = store.next_task(store.next_group()["id"])
+    assert store.task_is_satisfied(new_task["id"]) is False
+
+    newer_observation = observation("youtube", "available")
+    store._insert_observation(
+        new_group["id"], "direct-de", "youtube", newer_observation
+    )
+    assert store.task_is_satisfied(new_task["id"]) is True
+    store.supersede_task(new_task["id"], "newer evidence exists")
+    assert store.group(new_group["id"])["tasks"][0]["status"] == "superseded"
+
+
 def test_observation_artifact_path_is_reduced_to_basename(tmp_path):
     store = Store(tmp_path / "state.sqlite3")
     group = store.create_group(["direct-de"], ["youtube"])

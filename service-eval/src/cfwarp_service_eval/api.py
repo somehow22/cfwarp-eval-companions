@@ -338,6 +338,12 @@ class Runtime:
             preflighted: set[str] = set()
             while task := self.store.next_task(group["id"]):
                 lane = self.lanes[task["lane_id"]]
+                if self.store.task_is_satisfied(task["id"]):
+                    self.store.supersede_task(
+                        task["id"],
+                        "newer observation completed after this group was queued",
+                    )
+                    continue
                 self.store.start_task(task["id"])
                 try:
                     if lane.id not in preflighted:
