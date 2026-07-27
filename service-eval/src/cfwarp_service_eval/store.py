@@ -40,6 +40,12 @@ MIN_HEARTBEAT_SAMPLES = 5
 PERFORMANCE_BANDS = ((10.0, "fast"), (2.0, "moderate"), (0.0, "slow"))
 
 
+# A single mismatched sample means nothing: observed region legitimately varies
+# and the observation contract treats a mismatch as evidence, not failure. Only a
+# lane that essentially never reaches its region is worth surfacing.
+REGION_MATCH_FLOOR = 0.5
+
+
 def performance_band(throughput_mibps: float | None) -> str | None:
     if throughput_mibps is None:
         return None
@@ -283,6 +289,54 @@ class Store:
                 ),
             )
 
+    def region_stats(
+        self,
+        lane_id: str,
+        requested_region: str | None,
+        window_hours: int = HEARTBEAT_WINDOW_HOURS,
+    ) -> dict[str, Any]:
+        """Compare where a lane was asked to exit against where it actually did.
+
+        A provider can fall back silently when a requested region is
+        unavailable: the lane stays up, reports warp=on, and serves a country
+        nobody asked for. No tunnel-level signal detects that. Heartbeats
+        already record the observed region, so the comparison is free.
+        """
+        if not requested_region:
+            # Direct lanes request nothing, so there is nothing to mismatch.
+            return {
+                "requested": None,
+                "observed": None,
+                "match_ratio": None,
+                "matches": None,
+                "samples": 0,
+            }
+        since = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT loc FROM heartbeats WHERE lane_id=? AND observed_at>=? AND loc IS NOT NULL",
+                (lane_id, since),
+            ).fetchall()
+        locs = [row["loc"] for row in rows if row["loc"]]
+        if not locs:
+            return {
+                "requested": requested_region,
+                "observed": None,
+                "match_ratio": None,
+                "matches": None,
+                "samples": 0,
+            }
+        hits = sum(1 for loc in locs if loc.upper() == requested_region.upper())
+        ratio = hits / len(locs)
+        observed = max(set(locs), key=locs.count)
+        return {
+            "requested": requested_region,
+            "observed": observed,
+            "match_ratio": round(ratio, 3),
+            "matches": ratio >= REGION_MATCH_FLOOR,
+            "samples": len(locs),
+        }
+
     def heartbeat_stats(
         self, lane_id: str, window_hours: int = TIER_WINDOW_HOURS
     ) -> dict[str, Any]:
@@ -323,7 +377,10 @@ class Store:
         }
 
     def lane_tier(
-        self, lane_id: str, window_hours: int = TIER_WINDOW_HOURS
+        self,
+        lane_id: str,
+        window_hours: int = TIER_WINDOW_HOURS,
+        requested_region: str | None = None,
     ) -> dict[str, Any]:
         """Derive a routing tier for one lane.
 
@@ -389,6 +446,10 @@ class Store:
             "meets_throughput_floor": meets_floor,
             "throughput_mibps": throughput,
             "performance_band": performance_band(throughput),
+            # Descriptive, like the performance band. A lane serving the wrong
+            # region is not demoted: the contract says a mismatch matters only
+            # when a scenario explicitly requires that region.
+            "region": self.region_stats(lane_id, requested_region),
         }
 
     def prune(self, artifact_root: Path, retention_days: int, max_bytes: int) -> None:

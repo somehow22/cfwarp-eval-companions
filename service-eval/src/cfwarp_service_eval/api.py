@@ -159,7 +159,9 @@ class Runtime:
 
     def due_scenarios(self, lane_id: str) -> list[str]:
         """Scenarios whose newest observation is older than this lane's cadence."""
-        tier = self.store.lane_tier(lane_id)["tier"]
+        tier = self.store.lane_tier(
+            lane_id, requested_region=self.lanes[lane_id].requested_region
+        )["tier"]
         deadline = datetime.now(timezone.utc) - timedelta(
             seconds=self.sweep_interval * TIER_CADENCE.get(tier, 1.0)
         )
@@ -317,7 +319,10 @@ def tiers(_: Protected) -> list[dict[str, Any]]:
     """Derived routing tier per lane. This is the consumer-facing surface:
     callers route on tier, not on raw availability arithmetic."""
     assert runtime
-    return [runtime.store.lane_tier(lane_id) for lane_id in runtime.lanes]
+    return [
+        runtime.store.lane_tier(lane_id, requested_region=lane.requested_region)
+        for lane_id, lane in runtime.lanes.items()
+    ]
 
 
 @app.post("/v1/run-groups", status_code=status.HTTP_202_ACCEPTED)
@@ -409,9 +414,13 @@ def metrics(_: Protected) -> str:
         "# TYPE cfwarp_probe_lane_throughput_mibps gauge",
         "# HELP cfwarp_probe_lane_performance_band Lane performance band, 1 for the active band.",
         "# TYPE cfwarp_probe_lane_performance_band gauge",
+        "# HELP cfwarp_probe_lane_region_match Lane reaches its requested egress region.",
+        "# TYPE cfwarp_probe_lane_region_match gauge",
+        "# HELP cfwarp_probe_lane_region_match_ratio Fraction of recent heartbeats in the requested region.",
+        "# TYPE cfwarp_probe_lane_region_match_ratio gauge",
     ]
     for lane_id, lane in runtime.lanes.items():
-        tier = runtime.store.lane_tier(lane_id)
+        tier = runtime.store.lane_tier(lane_id, requested_region=lane.requested_region)
         common = (
             f'lane="{escape_label(lane_id)}",'
             f'composition="{escape_label(lane.composition)}",'
@@ -444,6 +453,18 @@ def metrics(_: Protected) -> str:
                     f'cfwarp_probe_lane_performance_band{{{common},band="{name}"}} '
                     f"{1 if band == name else 0}"
                 )
+        region = tier.get("region") or {}
+        # Only lanes that requested a region can mismatch one. Direct lanes are
+        # omitted entirely rather than reported as matching or failing.
+        if region.get("matches") is not None:
+            observed = escape_label(region.get("observed") or "")
+            lines.append(
+                f'cfwarp_probe_lane_region_match{{{common},observed="{observed}"}} '
+                f"{1 if region['matches'] else 0}"
+            )
+            lines.append(
+                f"cfwarp_probe_lane_region_match_ratio{{{common}}} {region['match_ratio']}"
+            )
         for scenario_id, record in runtime.store.latest_by_scenario(lane_id).items():
             result = record["payload"].get("result") or {}
             label = f'{common},scenario="{escape_label(scenario_id)}"'

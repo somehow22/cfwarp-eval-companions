@@ -246,3 +246,42 @@ def test_a_slow_substrate_lane_is_banded_but_never_failed(tmp_path):
     assert tier["throughput_mibps"] == 0.78
     # Banding must not demote the lane: it is not a gate.
     assert tier["tier"] == "preferred"
+
+
+def beat_loc(store, lane, loc, count=1):
+    for _ in range(count):
+        store.record_heartbeat(
+            lane, {"ok": True, "checks": {"trace": {"warp": "on", "loc": loc}}}
+        )
+
+
+def test_region_mismatch_is_detected_but_never_demotes(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    # Asked for Austria, provider silently served Germany every time.
+    beat_loc(store, "ps-at", "DE", count=10)
+    record(store, "ps-at", "youtube", "available")
+    tier = store.lane_tier("ps-at", requested_region="AT")
+    region = tier["region"]
+    assert region["matches"] is False
+    assert region["observed"] == "DE"
+    assert region["match_ratio"] == 0.0
+    # A mismatch is evidence, not failure. The lane must not be demoted.
+    assert tier["tier"] == "preferred"
+
+
+def test_region_match_is_case_insensitive_and_tolerates_variance(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    beat_loc(store, "fv-ch", "ch", count=8)
+    beat_loc(store, "fv-ch", "DE", count=2)
+    region = store.lane_tier("fv-ch", requested_region="CH")["region"]
+    # Occasional drift should not read as a broken lane.
+    assert region["matches"] is True
+    assert region["match_ratio"] == 0.8
+
+
+def test_a_lane_requesting_no_region_cannot_mismatch(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    beat_loc(store, "direct-wg", "US", count=5)
+    region = store.lane_tier("direct-wg", requested_region=None)["region"]
+    assert region["matches"] is None
+    assert region["requested"] is None
