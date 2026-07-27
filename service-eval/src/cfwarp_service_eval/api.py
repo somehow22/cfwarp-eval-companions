@@ -215,6 +215,7 @@ class Runtime:
         self.wakeup = asyncio.Event()
         self.stop = asyncio.Event()
         self.tasks: list[asyncio.Task[None]] = []
+        self.background_failures: set[str] = set()
 
     async def start(self) -> None:
         self.store.recover(
@@ -229,7 +230,15 @@ class Runtime:
         self.wakeup.set()
 
     def spawn(self, target: Any, name: str) -> None:
-        self.tasks.append(asyncio.create_task(target(), name=name))
+        task = asyncio.create_task(target(), name=name)
+        task.add_done_callback(self._record_background_failure)
+        self.tasks.append(task)
+
+    def _record_background_failure(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        if task.exception() is not None:
+            self.background_failures.add(task.get_name())
 
     async def close(self) -> None:
         self.stop.set()
@@ -337,7 +346,12 @@ class Runtime:
                 continue
             preflighted: set[str] = set()
             while task := self.store.next_task(group["id"]):
-                lane = self.lanes[task["lane_id"]]
+                lane = self.lanes.get(task["lane_id"])
+                if lane is None:
+                    self.store.supersede_task(
+                        task["id"], "lane removed from evaluator allowlist"
+                    )
+                    continue
                 if self.store.task_is_satisfied(task["id"]):
                     self.store.supersede_task(
                         task["id"],
@@ -441,6 +455,8 @@ MetricsProtected = Annotated[None, Depends(require_metrics_bearer)]
 
 @app.get("/healthz", include_in_schema=False)
 def healthz() -> dict[str, str]:
+    if runtime is not None and runtime.background_failures:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "service unavailable")
     return {"status": "ok"}
 
 

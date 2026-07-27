@@ -85,6 +85,19 @@ def test_recovery_supersedes_duplicate_pending_cells(tmp_path):
     assert duplicate_group["tasks"][0]["status"] == "superseded"
 
 
+def test_recovery_supersedes_tasks_for_removed_lanes(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    group = store.create_group(["removed-lane"], ["youtube"])
+
+    store.recover({}, {"youtube": "youtube.anonymous_public_video"})
+
+    recovered = store.group(group["id"])
+    assert recovered["status"] == "complete"
+    assert recovered["tasks"][0]["status"] == "superseded"
+    assert recovered["tasks"][0]["error"] == "lane removed from evaluator allowlist"
+    assert store.pending_cells() == set()
+
+
 def test_recovery_backfills_legacy_unknown_provenance_without_changing_result_time(
     tmp_path,
 ):

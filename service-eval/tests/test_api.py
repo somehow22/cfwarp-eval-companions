@@ -71,6 +71,14 @@ def test_health_is_generic_and_v1_rejects_missing_bearer(tmp_path, monkeypatch):
         assert test_client.get("/openapi.json").status_code == 401
 
 
+def test_health_fails_when_a_critical_background_loop_exits(tmp_path, monkeypatch):
+    with client(tmp_path, monkeypatch) as test_client:
+        api.runtime.background_failures.add("probe-sweep-worker")
+        response = test_client.get("/healthz")
+        assert response.status_code == 503
+        assert response.json() == {"detail": "service unavailable"}
+
+
 def test_lane_response_redacts_proxy_and_post_rejects_ssrf_fields(
     tmp_path, monkeypatch
 ):

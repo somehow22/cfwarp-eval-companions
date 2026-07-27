@@ -129,7 +129,26 @@ class Store:
                 "UPDATE run_groups SET status='queued', started_at=NULL WHERE status='running'"
             )
             self._backfill_observation_provenance(lanes, scenario_ids, runtime)
+            self._supersede_unconfigured_pending_tasks(lanes, now.isoformat())
             self._supersede_duplicate_pending_tasks(now.isoformat())
+
+    def _supersede_unconfigured_pending_tasks(
+        self, lanes: Mapping[str, Mapping[str, Any]], now: str
+    ) -> None:
+        rows = self.db.execute(
+            "SELECT id,lane_id FROM tasks WHERE status='queued'"
+        ).fetchall()
+        for row in rows:
+            if row["lane_id"] not in lanes:
+                self.db.execute(
+                    """
+                    UPDATE tasks
+                    SET status='superseded',finished_at=?,
+                        error='lane removed from evaluator allowlist'
+                    WHERE id=?
+                    """,
+                    (now, row["id"]),
+                )
 
     def _backfill_observation_provenance(
         self,
@@ -219,6 +238,9 @@ class Store:
                     """,
                     (now, row["id"]),
                 )
+        self._complete_empty_queued_groups(now)
+
+    def _complete_empty_queued_groups(self, now: str) -> None:
         self.db.execute(
             """
             UPDATE run_groups
