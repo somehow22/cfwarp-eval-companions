@@ -333,7 +333,13 @@ class Store:
             "requested": requested_region,
             "observed": observed,
             "match_ratio": round(ratio, 3),
-            "matches": ratio >= REGION_MATCH_FLOOR,
+            # Do not classify one transient observation as region drift. Reuse
+            # the heartbeat sample floor so the signal represents persistence.
+            "matches": (
+                ratio >= REGION_MATCH_FLOOR
+                if len(locs) >= MIN_HEARTBEAT_SAMPLES
+                else None
+            ),
             "samples": len(locs),
         }
 

@@ -269,6 +269,14 @@ def test_region_mismatch_is_detected_but_never_demotes(tmp_path):
     assert tier["tier"] == "preferred"
 
 
+def test_one_region_mismatch_is_not_persistent_drift(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    beat_loc(store, "ps-at", "DE")
+    region = store.lane_tier("ps-at", requested_region="AT")["region"]
+    assert region["matches"] is None
+    assert region["samples"] == 1
+
+
 def test_region_match_is_case_insensitive_and_tolerates_variance(tmp_path):
     store = Store(tmp_path / "state.sqlite3")
     beat_loc(store, "fv-ch", "ch", count=8)
