@@ -19,6 +19,16 @@ SCENARIOS = {
     "reddit": "reddit.anonymous_public_listing",
     "perf": "perf.throughput_sample",
 }
+BROWSER_SCENARIOS = frozenset(
+    {
+        "turnstile-reference",
+        "gemini",
+        "chatgpt",
+        "google-search",
+        "reddit",
+    }
+)
+LIGHTWEIGHT_SCENARIOS = frozenset(SCENARIOS) - BROWSER_SCENARIOS
 
 # Direct lanes carry the repeat-gate floor. Substrate throughput is a property
 # of the provider, so those lanes record evidence without a pass/fail floor.

@@ -67,6 +67,10 @@ subprocess at a time. It reads the bearer token from
 `SERVICE_EVAL_STATE_ROOT`. The API publishes only lane metadata; configured
 proxy URLs never enter responses.
 
+`/metrics` may use a separately rotatable bearer token through
+`SERVICE_EVAL_METRICS_TOKEN_FILE`. If that variable is absent, it temporarily
+falls back to the API token so deployments can migrate without an outage.
+
 The authenticated `/v1` surface lists the fixed lanes/scenarios, accepts a run
 group, reports group state, and returns Observation v1 records. `/healthz` is
 unauthenticated and generic. `/docs`, `/redoc`, and `/openapi.json` require the
@@ -79,6 +83,26 @@ CI or a clean sandbox should use the same locked install:
 uv sync --locked --dev
 uv run pytest
 ```
+
+## Probe execution profiles
+
+Lightweight service checks and browser automation are separate capabilities:
+
+- `perf` and `youtube` run locally without a browser and are suitable for small
+  containers or function-style runtimes.
+- browser scenarios are optional and disabled by default.
+- `SERVICE_EVAL_BROWSER_EXECUTION=local` enables bundled Chromium only when the
+  detected runtime ceiling meets `SERVICE_EVAL_BROWSER_MIN_MEMORY_MIB` (768 MiB
+  by default).
+- `SERVICE_EVAL_BROWSER_EXECUTION=agentcore` delegates browser work to the
+  existing ephemeral cloud provider integration and does not impose the local
+  Chromium memory floor.
+
+Use `SERVICE_EVAL_SCENARIOS` to select the node's scenario set.
+`/v1/scenario-capabilities` returns all known scenarios with their execution
+class, target, minimum memory, enabled state, and disable reason. This makes a
+small evaluator a valid lightweight probe node rather than a failed browser
+node.
 
 ## YouTube gold scenario
 

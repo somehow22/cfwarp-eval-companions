@@ -21,11 +21,13 @@ class ProbeRunner:
         deadline_seconds: int = 180,
         perf_transfer_bytes: int = 25 * 1024 * 1024,
         perf_runs: int = 3,
+        browser_execution: str = "disabled",
     ):
         self.artifact_root = artifact_root
         self.deadline_seconds = deadline_seconds
         self.perf_transfer_bytes = perf_transfer_bytes
         self.perf_runs = perf_runs
+        self.browser_execution = browser_execution
 
     async def preflight(self, group_id: str, lane: Lane) -> dict[str, Any]:
         output = self.artifact_root / group_id / lane.id / "preflight"
@@ -138,6 +140,8 @@ class ProbeRunner:
             if lane.composition == "direct-warp":
                 command += ["--floor-mibps", str(DIRECT_THROUGHPUT_FLOOR_MIBPS)]
         else:
+            if self.browser_execution == "disabled":
+                raise ProbeError("browser scenario is disabled on this runtime")
             command = [
                 "deno",
                 "task",
@@ -152,6 +156,8 @@ class ProbeRunner:
                 "--capture-screenshot",
                 "false",
             ]
+            if self.browser_execution == "agentcore":
+                command += ["--browser-provider", "agentcore"]
         await self._run(command, self.deadline_seconds + 15, check=False)
         summary_path = output / "summary.json"
         if not summary_path.is_file():
@@ -198,6 +204,10 @@ def safe_environment() -> dict[str, str]:
         "XDG_CACHE_HOME",
         "XDG_RUNTIME_DIR",
         "AGENT_BROWSER_EXECUTABLE_PATH",
+        "AWS_PROFILE",
+        "AGENTCORE_REGION",
+        "AGENTCORE_BROWSER_ID",
+        "AGENTCORE_SESSION_TIMEOUT",
     }
     env = {key: value for key, value in os.environ.items() if key in allowed}
     env["HOME"] = os.environ.get("AGENT_BROWSER_RUNTIME_HOME", "/tmp")

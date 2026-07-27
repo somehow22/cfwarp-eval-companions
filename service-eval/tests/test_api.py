@@ -9,6 +9,7 @@ from cfwarp_service_eval.runner import ProbeRunner
 
 
 TOKEN = "test-token-that-is-longer-than-thirty-two-characters"
+METRICS_TOKEN = "metrics-token-that-is-longer-than-thirty-two-characters"
 
 
 def lane():
@@ -31,9 +32,12 @@ def client(tmp_path, monkeypatch, lanes_payload=None, heartbeat=False, scheduler
     lanes.write_text(json.dumps(lanes_payload or [lane()]))
     token = tmp_path / "token"
     token.write_text(TOKEN)
+    metrics_token = tmp_path / "metrics-token"
+    metrics_token.write_text(METRICS_TOKEN)
     monkeypatch.setenv("SERVICE_EVAL_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.setenv("SERVICE_EVAL_LANES_FILE", str(lanes))
     monkeypatch.setenv("SERVICE_EVAL_TOKEN_FILE", str(token))
+    monkeypatch.setenv("SERVICE_EVAL_METRICS_TOKEN_FILE", str(metrics_token))
     # Background loops are opt-in, and independently so: enabling the scheduler
     # would drive sweeps and muddy a heartbeat-only assertion.
     monkeypatch.setenv("SERVICE_EVAL_HEARTBEAT_ENABLED", "1" if heartbeat else "0")
@@ -53,6 +57,10 @@ def client(tmp_path, monkeypatch, lanes_payload=None, heartbeat=False, scheduler
 
 def auth():
     return {"Authorization": f"Bearer {TOKEN}"}
+
+
+def metrics_auth():
+    return {"Authorization": f"Bearer {METRICS_TOKEN}"}
 
 
 def test_health_is_generic_and_v1_rejects_missing_bearer(tmp_path, monkeypatch):
@@ -94,7 +102,8 @@ def test_tiers_report_unknown_before_any_evidence(tmp_path, monkeypatch):
 def test_metrics_require_auth_and_expose_bounded_tier_series(tmp_path, monkeypatch):
     with client(tmp_path, monkeypatch) as test_client:
         assert test_client.get("/metrics").status_code == 401
-        body = test_client.get("/metrics", headers=auth()).text
+        assert test_client.get("/metrics", headers=auth()).status_code == 401
+        body = test_client.get("/metrics", headers=metrics_auth()).text
         assert 'cfwarp_probe_lane_tier{lane="direct-de"' in body
         assert 'tier="preferred"} 0' in body
         assert 'tier="unknown"} 1' in body
@@ -203,7 +212,7 @@ def test_warp_state_is_distinguishable_from_unreachability(tmp_path, monkeypatch
         store.record_heartbeat(
             "direct-de", {"ok": False, "checks": {"trace": {"warp": "off"}}}
         )
-        body = test_client.get("/metrics", headers=auth()).text
+        body = test_client.get("/metrics", headers=metrics_auth()).text
         # A lane serving traffic off-WARP must not look like an unreachable one.
         series = [
             line
@@ -216,8 +225,7 @@ def test_warp_state_is_distinguishable_from_unreachability(tmp_path, monkeypatch
 
 
 def test_node_scenario_allowlist_restricts_scheduling_and_api(tmp_path, monkeypatch):
-    # A memory-constrained node must not schedule browser scenarios at all,
-    # rather than scheduling and failing them as tooling errors.
+    # A lightweight profile runs on a small node without any browser runtime.
     monkeypatch.setenv("SERVICE_EVAL_SCENARIOS", "perf,youtube")
     with client(tmp_path, monkeypatch) as test_client:
         listed = {
@@ -232,6 +240,75 @@ def test_node_scenario_allowlist_restricts_scheduling_and_api(tmp_path, monkeypa
         )
         assert rejected.status_code == 422
         assert "not enabled on this node" in rejected.json()["detail"]
+
+
+def test_browser_capability_is_optional_and_disabled_by_default(tmp_path, monkeypatch):
+    with client(tmp_path, monkeypatch) as test_client:
+        enabled = {
+            row["id"] for row in test_client.get("/v1/scenarios", headers=auth()).json()
+        }
+        assert enabled == {"perf", "youtube"}
+        capabilities = {
+            row["id"]: row
+            for row in test_client.get(
+                "/v1/scenario-capabilities", headers=auth()
+            ).json()
+        }
+        assert capabilities["perf"]["execution_class"] == "lightweight"
+        assert capabilities["chatgpt"]["execution_class"] == "browser"
+        assert capabilities["chatgpt"]["enabled"] is False
+        assert capabilities["chatgpt"]["execution_target"] == "none"
+        assert "optional and disabled" in capabilities["chatgpt"]["reason"]
+
+
+def test_local_browser_requires_the_memory_prerequisite(tmp_path, monkeypatch):
+    monkeypatch.setenv("SERVICE_EVAL_BROWSER_EXECUTION", "local")
+    monkeypatch.setenv("SERVICE_EVAL_BROWSER_MIN_MEMORY_MIB", "768")
+    monkeypatch.setattr(api, "memory_limit_mib", lambda: 192)
+    with client(tmp_path, monkeypatch) as test_client:
+        enabled = {
+            row["id"] for row in test_client.get("/v1/scenarios", headers=auth()).json()
+        }
+        assert enabled == {"perf", "youtube"}
+        capability = next(
+            row
+            for row in test_client.get(
+                "/v1/scenario-capabilities", headers=auth()
+            ).json()
+            if row["id"] == "chatgpt"
+        )
+        assert capability["enabled"] is False
+        assert capability["minimum_memory_mib"] == 768
+        assert "runtime ceiling is 192 MiB" in capability["reason"]
+
+
+def test_local_and_cloud_browser_execution_are_explicit(tmp_path, monkeypatch):
+    monkeypatch.setenv("SERVICE_EVAL_BROWSER_EXECUTION", "local")
+    monkeypatch.setattr(api, "memory_limit_mib", lambda: 1024)
+    with client(tmp_path, monkeypatch) as test_client:
+        capability = next(
+            row
+            for row in test_client.get(
+                "/v1/scenario-capabilities", headers=auth()
+            ).json()
+            if row["id"] == "chatgpt"
+        )
+        assert capability["enabled"] is True
+        assert capability["execution_target"] == "local"
+
+    monkeypatch.setenv("SERVICE_EVAL_BROWSER_EXECUTION", "agentcore")
+    monkeypatch.setattr(api, "memory_limit_mib", lambda: 192)
+    with client(tmp_path, monkeypatch) as test_client:
+        capability = next(
+            row
+            for row in test_client.get(
+                "/v1/scenario-capabilities", headers=auth()
+            ).json()
+            if row["id"] == "chatgpt"
+        )
+        assert capability["enabled"] is True
+        assert capability["execution_target"] == "agentcore"
+        assert capability["minimum_memory_mib"] is None
 
 
 def test_unknown_scenario_in_the_allowlist_is_rejected_at_startup(tmp_path):

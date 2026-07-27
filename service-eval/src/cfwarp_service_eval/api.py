@@ -12,7 +12,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, sta
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .config import SCENARIOS, load_lanes
+from .config import BROWSER_SCENARIOS, LIGHTWEIGHT_SCENARIOS, SCENARIOS, load_lanes
 from .runner import ProbeRunner
 from .store import QueueFull, Store, parse_time
 
@@ -22,7 +22,7 @@ class RunGroupRequest(BaseModel):
     # Lanes are a fixed server-side allowlist, so a larger batch introduces no
     # new reachable target. Flood protection is the queue depth cap instead.
     lane_ids: list[str] = Field(min_length=1, max_length=16)
-    scenario_ids: list[str] = Field(min_length=1, max_length=6)
+    scenario_ids: list[str] = Field(min_length=1, max_length=len(SCENARIOS))
 
     @field_validator("lane_ids", "scenario_ids")
     @classmethod
@@ -45,6 +45,99 @@ def parse_scenarios(raw: str | None) -> dict[str, str]:
     if unknown:
         raise ValueError(f"unknown scenario IDs in SERVICE_EVAL_SCENARIOS: {unknown}")
     return {key: SCENARIOS[key] for key in selected}
+
+
+def parse_browser_execution(raw: str | None) -> str:
+    value = (raw or "disabled").strip().lower()
+    if value not in {"disabled", "local", "agentcore"}:
+        raise ValueError(
+            "SERVICE_EVAL_BROWSER_EXECUTION must be disabled, local, or agentcore"
+        )
+    return value
+
+
+def memory_limit_mib() -> int:
+    """Return the effective cgroup memory ceiling, falling back to host RAM."""
+    cgroup_limit = Path("/sys/fs/cgroup/memory.max")
+    if cgroup_limit.is_file():
+        raw = cgroup_limit.read_text(encoding="utf-8").strip()
+        if raw != "max":
+            return max(1, int(raw) // (1024 * 1024))
+    meminfo = Path("/proc/meminfo")
+    if meminfo.is_file():
+        for line in meminfo.read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemTotal:"):
+                return max(1, int(line.split()[1]) // 1024)
+    page_count = os.sysconf("SC_PHYS_PAGES")
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    if page_count > 0 and page_size > 0:
+        return max(1, page_count * page_size // (1024 * 1024))
+    raise ValueError("cannot determine runtime memory ceiling")
+
+
+def resolve_scenario_capabilities(
+    raw: str | None,
+    browser_execution: str,
+    available_memory_mib: int,
+    browser_min_memory_mib: int,
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
+    requested = parse_scenarios(raw)
+    enabled: dict[str, str] = {}
+    capabilities: list[dict[str, Any]] = []
+    for scenario_id, observation_id in SCENARIOS.items():
+        execution_class = (
+            "browser" if scenario_id in BROWSER_SCENARIOS else "lightweight"
+        )
+        selected = scenario_id in requested
+        reason = "not selected by SERVICE_EVAL_SCENARIOS"
+        execution_target = "local"
+        scenario_enabled = selected
+        minimum_memory_mib: int | None = None
+
+        if scenario_id in LIGHTWEIGHT_SCENARIOS:
+            reason = "enabled" if selected else reason
+        elif not selected:
+            execution_target = "none"
+        elif browser_execution == "disabled":
+            scenario_enabled = False
+            execution_target = "none"
+            reason = "browser automation is optional and disabled"
+        elif browser_execution == "local":
+            minimum_memory_mib = browser_min_memory_mib
+            if available_memory_mib < browser_min_memory_mib:
+                scenario_enabled = False
+                execution_target = "none"
+                reason = (
+                    f"local browser requires {browser_min_memory_mib} MiB; "
+                    f"runtime ceiling is {available_memory_mib} MiB"
+                )
+            else:
+                reason = "enabled with local Chromium"
+        else:
+            execution_target = "agentcore"
+            reason = "enabled with cloud browser execution"
+
+        if scenario_enabled:
+            enabled[scenario_id] = observation_id
+        capabilities.append(
+            {
+                "id": scenario_id,
+                "observation_scenario_id": observation_id,
+                "execution_class": execution_class,
+                "enabled": scenario_enabled,
+                "execution_target": execution_target,
+                "minimum_memory_mib": minimum_memory_mib,
+                "reason": reason,
+            }
+        )
+    return enabled, capabilities
+
+
+def read_token(path: Path, purpose: str) -> str:
+    token = path.read_text(encoding="utf-8").strip()
+    if len(token) < 32:
+        raise ValueError(f"{purpose} bearer token must be at least 32 characters")
+    return token
 
 
 def env_flag(name: str, default: bool = True) -> bool:
@@ -78,21 +171,40 @@ class Runtime:
                 )
             )
         )
-        self.token = (
+        self.token = read_token(
             Path(
                 os.environ.get(
                     "SERVICE_EVAL_TOKEN_FILE", "/run/secrets/cfwarp-probe-api-token"
                 )
-            )
-            .read_text(encoding="utf-8")
-            .strip()
+            ),
+            "API",
         )
-        if len(self.token) < 32:
-            raise ValueError("API bearer token must be at least 32 characters")
+        metrics_token_file = os.environ.get("SERVICE_EVAL_METRICS_TOKEN_FILE")
+        self.metrics_token = (
+            read_token(Path(metrics_token_file), "metrics")
+            if metrics_token_file
+            else self.token
+        )
+        self.browser_execution = parse_browser_execution(
+            os.environ.get("SERVICE_EVAL_BROWSER_EXECUTION")
+        )
+        self.browser_min_memory_mib = env_int(
+            "SERVICE_EVAL_BROWSER_MIN_MEMORY_MIB", 768
+        )
+        if self.browser_min_memory_mib <= 0:
+            raise ValueError("SERVICE_EVAL_BROWSER_MIN_MEMORY_MIB must be positive")
+        self.memory_limit_mib = memory_limit_mib()
+        self.scenarios, self.scenario_capabilities = resolve_scenario_capabilities(
+            os.environ.get("SERVICE_EVAL_SCENARIOS"),
+            self.browser_execution,
+            self.memory_limit_mib,
+            self.browser_min_memory_mib,
+        )
         self.store = Store(self.state_root / "queue.sqlite3")
         self.runner = ProbeRunner(
             self.state_root / "artifacts",
             env_int("SERVICE_EVAL_DEADLINE_SECONDS", 180),
+            browser_execution=self.browser_execution,
         )
         self.heartbeat_interval = env_int("SERVICE_EVAL_HEARTBEAT_INTERVAL_SECONDS", 60)
         self.sweep_interval = env_int("SERVICE_EVAL_SWEEP_INTERVAL_SECONDS", 6 * 3600)
@@ -100,12 +212,6 @@ class Runtime:
         self.lane_chunk = env_int("SERVICE_EVAL_LANE_CHUNK", 5)
         self.heartbeat_enabled = env_flag("SERVICE_EVAL_HEARTBEAT_ENABLED")
         self.scheduler_enabled = env_flag("SERVICE_EVAL_SCHEDULER_ENABLED")
-        # Not every node can run every scenario. The browser scenarios spawn
-        # Chromium, which a memory-constrained node cannot host without
-        # evicting the very lanes it is meant to observe. Restricting the set
-        # keeps those attempts from being scheduled at all, rather than letting
-        # them fail and pollute evaluation completeness with tooling errors.
-        self.scenarios = parse_scenarios(os.environ.get("SERVICE_EVAL_SCENARIOS"))
         self.wakeup = asyncio.Event()
         self.stop = asyncio.Event()
         self.tasks: list[asyncio.Task[None]] = []
@@ -278,11 +384,15 @@ async def protect_docs(request: Request, call_next):
     return await call_next(request)
 
 
+def bearer_matches(authorization: str | None, expected: str) -> bool:
+    scheme, _, token = (authorization or "").partition(" ")
+    return scheme.lower() == "bearer" and hmac.compare_digest(token, expected)
+
+
 def require_bearer(authorization: Annotated[str | None, Header()] = None) -> None:
     if runtime is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "service unavailable")
-    scheme, _, token = (authorization or "").partition(" ")
-    if scheme.lower() != "bearer" or not hmac.compare_digest(token, runtime.token):
+    if not bearer_matches(authorization, runtime.token):
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "invalid bearer token",
@@ -293,19 +403,39 @@ def require_bearer(authorization: Annotated[str | None, Header()] = None) -> Non
 Protected = Annotated[None, Depends(require_bearer)]
 
 
+def require_metrics_bearer(
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    if runtime is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "service unavailable")
+    if not bearer_matches(authorization, runtime.metrics_token):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "invalid metrics bearer token",
+            {"WWW-Authenticate": "Bearer"},
+        )
+
+
+MetricsProtected = Annotated[None, Depends(require_metrics_bearer)]
+
+
 @app.get("/healthz", include_in_schema=False)
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/v1/scenarios")
-def scenarios(_: Protected) -> list[dict[str, str]]:
+def scenarios(_: Protected) -> list[dict[str, Any]]:
     """Only the scenarios this node is configured to run."""
     assert runtime
-    return [
-        {"id": key, "observation_scenario_id": value}
-        for key, value in runtime.scenarios.items()
-    ]
+    return [row for row in runtime.scenario_capabilities if row["enabled"]]
+
+
+@app.get("/v1/scenario-capabilities")
+def scenario_capabilities(_: Protected) -> list[dict[str, Any]]:
+    """All known scenarios, including optional capabilities disabled here."""
+    assert runtime
+    return runtime.scenario_capabilities
 
 
 @app.get("/v1/lanes")
@@ -390,7 +520,7 @@ def escape_label(value: str) -> str:
 
 
 @app.get("/metrics", include_in_schema=False, response_class=PlainTextResponse)
-def metrics(_: Protected) -> str:
+def metrics(_: MetricsProtected) -> str:
     """Prometheus exposition for the node-local collector to scrape.
 
     Tags stay bounded to lane, scenario, and lane dimensions. Per-attempt values
