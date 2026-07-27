@@ -5,6 +5,20 @@ import pytest
 from cfwarp_service_eval.store import QueueFull, Store
 
 
+def lane():
+    return {
+        "id": "direct-de",
+        "instance_id": "cfwarp-direct-de",
+        "node_id": "proxy-host-1",
+        "composition": "direct-warp",
+        "transport": "wireguard",
+        "substrate_profile": None,
+        "requested_region": "DE",
+        "image_identity": "example@sha256:" + "a" * 64,
+        "config_digest": "sha256:" + "b" * 64,
+    }
+
+
 def test_queue_depth_admits_a_chunked_sweep_then_rejects(tmp_path):
     # A 9-lane node chunks into more than the old one-active-plus-one-waiting
     # capacity, so depth must exceed 2 while staying bounded.
@@ -18,15 +32,18 @@ def test_queue_depth_admits_a_chunked_sweep_then_rejects(tmp_path):
         store.create_group(["direct-de"], ["reddit"])
 
 
-def test_restart_recovery_records_unknown_observation_and_resumes_group(tmp_path):
+def test_restart_recovery_records_unknown_observation_and_completes_group(tmp_path):
     store = Store(tmp_path / "state.sqlite3")
     group = store.create_group(["direct-de"], ["youtube"])
     store.next_group()
     task = store.next_task(group["id"])
     store.start_task(task["id"])
-    store.recover()
+    store.recover(
+        {"direct-de": lane()},
+        {"youtube": "youtube.anonymous_public_video"},
+    )
     recovered = store.group(group["id"])
-    assert recovered["status"] == "queued"
+    assert recovered["status"] == "complete"
     assert recovered["tasks"][0]["status"] == "unknown"
     observation = store.latest()[0]
     assert observation["result"] == {
@@ -35,6 +52,37 @@ def test_restart_recovery_records_unknown_observation_and_resumes_group(tmp_path
         "eligible": False,
     }
     assert observation["failure_layer"] == "tooling"
+    assert observation["scenario_id"] == "youtube.anonymous_public_video"
+    assert observation["subject"] == {
+        "instance_id": "cfwarp-direct-de",
+        "node_id": "proxy-host-1",
+        "runtime": "podman",
+        "image_identity": "example@sha256:" + "a" * 64,
+        "config_digest": "sha256:" + "b" * 64,
+    }
+    assert observation["lane"] == {
+        "composition": "direct-warp",
+        "transport": "wireguard",
+        "substrate_profile": None,
+        "requested_region": "DE",
+    }
+
+
+def test_recovery_supersedes_duplicate_pending_cells(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    first = store.create_group(["direct-de"], ["youtube"])
+    duplicate = store.create_group(["direct-de"], ["youtube"])
+
+    store.recover(
+        {"direct-de": lane()},
+        {"youtube": "youtube.anonymous_public_video"},
+    )
+
+    assert store.pending_cells() == {("direct-de", "youtube")}
+    assert store.group(first["id"])["tasks"][0]["status"] == "queued"
+    duplicate_group = store.group(duplicate["id"])
+    assert duplicate_group["status"] == "complete"
+    assert duplicate_group["tasks"][0]["status"] == "superseded"
 
 
 def test_observation_artifact_path_is_reduced_to_basename(tmp_path):
@@ -182,7 +230,14 @@ def test_retention_removes_oldest_completed_group_and_artifacts(tmp_path):
     group = store.create_group(["direct-de"], ["youtube"])
     store.next_group()
     task = store.next_task(group["id"])
-    store.fail_task(task["id"], group["id"], "direct-de", "youtube", "test")
+    store.fail_task(
+        task["id"],
+        group["id"],
+        lane(),
+        "youtube",
+        "youtube.anonymous_public_video",
+        "test",
+    )
     store.complete_group(group["id"])
     old = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
     with store.db:

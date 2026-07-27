@@ -6,7 +6,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 def utcnow() -> str:
@@ -100,7 +100,12 @@ class Store:
               ON heartbeats(lane_id, observed_at DESC);
             """)
 
-    def recover(self) -> None:
+    def recover(
+        self,
+        lanes: Mapping[str, Mapping[str, Any]],
+        scenario_ids: Mapping[str, str],
+        runtime: str = "podman",
+    ) -> None:
         with self._lock, self.db:
             running = self.db.execute(
                 "SELECT group_id,lane_id,scenario_id FROM tasks WHERE status='running'"
@@ -108,7 +113,10 @@ class Store:
             now = datetime.now(timezone.utc)
             for row in running:
                 observation = unknown_observation(
-                    row["lane_id"], row["scenario_id"], now
+                    lanes[row["lane_id"]],
+                    scenario_ids[row["scenario_id"]],
+                    now,
+                    runtime,
                 )
                 self._insert_observation(
                     row["group_id"], row["lane_id"], row["scenario_id"], observation
@@ -120,6 +128,62 @@ class Store:
             self.db.execute(
                 "UPDATE run_groups SET status='queued', started_at=NULL WHERE status='running'"
             )
+            self._supersede_duplicate_pending_tasks(now.isoformat())
+
+    def _supersede_duplicate_pending_tasks(self, now: str) -> None:
+        """Keep only the oldest queued/running copy of each lane/scenario cell.
+
+        The scheduler evaluates freshness, so a cell remains due until its
+        active task finishes. Without pending-task deduplication, every
+        scheduler tick can enqueue another copy and starve later lanes.
+        """
+        rows = self.db.execute(
+            """
+            SELECT t.id,t.lane_id,t.scenario_id,t.status
+            FROM tasks t JOIN run_groups g ON g.id=t.group_id
+            WHERE t.status IN ('queued','running')
+            ORDER BY g.created_at,t.ordinal,t.id
+            """
+        ).fetchall()
+        claimed: set[tuple[str, str]] = set()
+        for row in rows:
+            cell = (row["lane_id"], row["scenario_id"])
+            if cell not in claimed:
+                claimed.add(cell)
+                continue
+            if row["status"] == "queued":
+                self.db.execute(
+                    """
+                    UPDATE tasks
+                    SET status='superseded',finished_at=?,
+                        error='duplicate pending scheduler cell'
+                    WHERE id=?
+                    """,
+                    (now, row["id"]),
+                )
+        self.db.execute(
+            """
+            UPDATE run_groups
+            SET status='complete',finished_at=?
+            WHERE status='queued'
+              AND NOT EXISTS (
+                SELECT 1 FROM tasks
+                WHERE tasks.group_id=run_groups.id
+                  AND tasks.status IN ('queued','running')
+              )
+            """,
+            (now,),
+        )
+
+    def pending_cells(self) -> set[tuple[str, str]]:
+        with self._lock:
+            rows = self.db.execute(
+                """
+                SELECT lane_id,scenario_id FROM tasks
+                WHERE status IN ('queued','running')
+                """
+            ).fetchall()
+        return {(row["lane_id"], row["scenario_id"]) for row in rows}
 
     def create_group(
         self, lane_ids: list[str], scenario_ids: list[str]
@@ -196,10 +260,18 @@ class Store:
             )
 
     def fail_task(
-        self, task_id: int, group_id: str, lane_id: str, scenario_id: str, error: str
+        self,
+        task_id: int,
+        group_id: str,
+        lane: Mapping[str, Any],
+        scenario_id: str,
+        observation_scenario_id: str,
+        error: str,
+        runtime: str = "podman",
     ) -> None:
         now = datetime.now(timezone.utc)
-        observation = unknown_observation(lane_id, scenario_id, now)
+        observation = unknown_observation(lane, observation_scenario_id, now, runtime)
+        lane_id = str(lane["id"])
         with self._lock, self.db:
             self._insert_observation(group_id, lane_id, scenario_id, observation)
             self.db.execute(
@@ -524,7 +596,10 @@ def sanitize_observation(observation: dict[str, Any]) -> dict[str, Any]:
 
 
 def unknown_observation(
-    lane_id: str, scenario_id: str, now: datetime
+    lane: Mapping[str, Any],
+    scenario_id: str,
+    now: datetime,
+    runtime: str = "podman",
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -534,17 +609,17 @@ def unknown_observation(
         "scenario_id": scenario_id,
         "probe": {"name": "probe-worker", "version": "1", "execution": "local"},
         "subject": {
-            "instance_id": lane_id,
-            "node_id": None,
-            "runtime": None,
-            "image_identity": None,
-            "config_digest": None,
+            "instance_id": lane["instance_id"],
+            "node_id": lane["node_id"],
+            "runtime": runtime,
+            "image_identity": lane["image_identity"],
+            "config_digest": lane["config_digest"],
         },
         "lane": {
-            "composition": None,
-            "transport": None,
-            "substrate_profile": None,
-            "requested_region": None,
+            "composition": lane["composition"],
+            "transport": lane["transport"],
+            "substrate_profile": lane.get("substrate_profile"),
+            "requested_region": lane.get("requested_region"),
         },
         "egress": {"warp": None, "region": None, "colo": None},
         "result": {

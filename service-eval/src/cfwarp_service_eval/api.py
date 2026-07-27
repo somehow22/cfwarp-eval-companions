@@ -217,7 +217,10 @@ class Runtime:
         self.tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
-        self.store.recover()
+        self.store.recover(
+            {lane_id: lane.public() for lane_id, lane in self.lanes.items()},
+            SCENARIOS,
+        )
         self.spawn(self.sweep_worker, "probe-sweep-worker")
         if self.heartbeat_enabled:
             self.spawn(self.heartbeat_loop, "probe-heartbeat")
@@ -298,8 +301,13 @@ class Runtime:
     def enqueue_due_sweeps(self) -> int:
         """Group lanes by their due scenario set, then chunk to the request cap."""
         by_scenarios: dict[tuple[str, ...], list[str]] = {}
+        pending = self.store.pending_cells()
         for lane_id in self.lanes:
-            due = tuple(self.due_scenarios(lane_id))
+            due = tuple(
+                scenario_id
+                for scenario_id in self.due_scenarios(lane_id)
+                if (lane_id, scenario_id) not in pending
+            )
             if due:
                 by_scenarios.setdefault(due, []).append(lane_id)
         created = 0
@@ -308,6 +316,11 @@ class Runtime:
                 chunk = lane_ids[index : index + self.lane_chunk]
                 try:
                     self.store.create_group(chunk, list(scenario_ids))
+                    pending.update(
+                        (lane_id, scenario_id)
+                        for lane_id in chunk
+                        for scenario_id in scenario_ids
+                    )
                     created += 1
                 except QueueFull:
                     return created
@@ -345,8 +358,9 @@ class Runtime:
                     self.store.fail_task(
                         task["id"],
                         group["id"],
-                        lane.id,
+                        lane.public(),
                         task["scenario_id"],
+                        self.scenarios[task["scenario_id"]],
                         type(error).__name__,
                     )
             self.store.complete_group(group["id"])

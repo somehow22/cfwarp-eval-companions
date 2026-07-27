@@ -75,6 +75,11 @@ The API runs one persistent queue with independent loops:
 - a **scheduler** enqueuing due work, so freshness is a property of the system
   rather than an operator chore.
 
+The scheduler permits at most one pending task for a lane/scenario cell. A
+worker or restart failure still emits `unknown`, but that row retains the same
+instance, image, config, composition, transport, substrate, and canonical
+scenario provenance as a successful observation.
+
 Callers cannot register proxies or supply target URLs. Lanes are a fixed
 server-side allowlist supplied by the operator, and configured proxy URLs never
 appear in API responses.

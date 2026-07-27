@@ -130,6 +130,16 @@ def test_scheduler_chunks_due_lanes_to_the_configured_batch(tmp_path, monkeypatc
         assert sizes == [2, 5]
 
 
+def test_scheduler_does_not_duplicate_pending_cells(tmp_path, monkeypatch):
+    with client(tmp_path, monkeypatch) as test_client:
+        assert test_client.get("/v1/lanes", headers=auth()).status_code == 200
+        assert api.runtime.enqueue_due_sweeps() == 1
+        assert api.runtime.enqueue_due_sweeps() == 0
+        assert api.runtime.store.pending_cells() == {
+            ("direct-de", scenario_id) for scenario_id in api.runtime.scenarios
+        }
+
+
 def test_scheduler_skips_lanes_with_fresh_evidence(tmp_path, monkeypatch):
     with client(tmp_path, monkeypatch) as test_client:
         assert test_client.get("/v1/lanes", headers=auth()).status_code == 200
@@ -204,6 +214,49 @@ def test_unknown_lane_and_scenario_are_rejected(tmp_path, monkeypatch):
             ).status_code
             == 422
         )
+
+
+def test_worker_failure_preserves_full_lane_and_subject_provenance(
+    tmp_path, monkeypatch
+):
+    with client(tmp_path, monkeypatch) as test_client:
+        response = test_client.post(
+            "/v1/run-groups",
+            headers=auth(),
+            json={"lane_ids": ["direct-de"], "scenario_ids": ["youtube"]},
+        )
+        assert response.status_code == 202
+        group_id = response.json()["id"]
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            group = test_client.get(f"/v1/run-groups/{group_id}", headers=auth()).json()
+            if group["status"] == "complete":
+                break
+            time.sleep(0.05)
+        assert group["status"] == "complete"
+
+        observation = test_client.get("/v1/observations/latest", headers=auth()).json()[
+            0
+        ]
+        assert observation["scenario_id"] == "youtube.anonymous_public_video"
+        assert observation["result"] == {
+            "availability": "unknown",
+            "class": "tooling_failure",
+            "eligible": False,
+        }
+        assert observation["subject"] == {
+            "instance_id": "cfwarp-direct-de",
+            "node_id": "proxy-host-1",
+            "runtime": "podman",
+            "image_identity": "example@sha256:" + "a" * 64,
+            "config_digest": "sha256:" + "b" * 64,
+        }
+        assert observation["lane"] == {
+            "composition": "direct",
+            "transport": "wireguard",
+            "substrate_profile": None,
+            "requested_region": "DE",
+        }
 
 
 def test_warp_state_is_distinguishable_from_unreachability(tmp_path, monkeypatch):
