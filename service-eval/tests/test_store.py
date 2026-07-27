@@ -85,6 +85,61 @@ def test_recovery_supersedes_duplicate_pending_cells(tmp_path):
     assert duplicate_group["tasks"][0]["status"] == "superseded"
 
 
+def test_recovery_backfills_legacy_unknown_provenance_without_changing_result_time(
+    tmp_path,
+):
+    store = Store(tmp_path / "state.sqlite3")
+    group = store.create_group(["direct-de"], ["youtube"])
+    now = datetime.now(timezone.utc)
+    legacy = {
+        "schema_version": 1,
+        "observation_id": "legacy-unknown",
+        "observed_at": now.isoformat(),
+        "fresh_until": (now + timedelta(hours=24)).isoformat(),
+        "scenario_id": "youtube",
+        "probe": {"name": "probe-worker", "version": "1", "execution": "local"},
+        "subject": {
+            "instance_id": "direct-de",
+            "node_id": None,
+            "runtime": None,
+            "image_identity": None,
+            "config_digest": None,
+        },
+        "lane": {
+            "composition": None,
+            "transport": None,
+            "substrate_profile": None,
+            "requested_region": None,
+        },
+        "egress": {"warp": None, "region": None, "colo": None},
+        "result": {
+            "availability": "unknown",
+            "class": "tooling_failure",
+            "eligible": False,
+        },
+        "confidence_stage": "single_observation",
+        "failure_layer": "tooling",
+        "latency_ms": 0,
+        "artifacts": [],
+    }
+    store._insert_observation(group["id"], "direct-de", "youtube", legacy)
+
+    store.recover(
+        {"direct-de": lane()},
+        {"youtube": "youtube.anonymous_public_video"},
+    )
+
+    repaired = store.latest()[0]
+    assert repaired["observation_id"] == "legacy-unknown"
+    assert repaired["observed_at"] == legacy["observed_at"]
+    assert repaired["fresh_until"] == legacy["fresh_until"]
+    assert repaired["result"] == legacy["result"]
+    assert repaired["failure_layer"] == "tooling"
+    assert repaired["scenario_id"] == "youtube.anonymous_public_video"
+    assert repaired["subject"]["config_digest"] == lane()["config_digest"]
+    assert repaired["lane"]["composition"] == "direct-warp"
+
+
 def test_observation_artifact_path_is_reduced_to_basename(tmp_path):
     store = Store(tmp_path / "state.sqlite3")
     group = store.create_group(["direct-de"], ["youtube"])

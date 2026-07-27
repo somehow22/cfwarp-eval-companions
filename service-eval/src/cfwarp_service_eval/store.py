@@ -128,7 +128,65 @@ class Store:
             self.db.execute(
                 "UPDATE run_groups SET status='queued', started_at=NULL WHERE status='running'"
             )
+            self._backfill_observation_provenance(lanes, scenario_ids, runtime)
             self._supersede_duplicate_pending_tasks(now.isoformat())
+
+    def _backfill_observation_provenance(
+        self,
+        lanes: Mapping[str, Mapping[str, Any]],
+        scenario_ids: Mapping[str, str],
+        runtime: str,
+    ) -> None:
+        """Repair legacy unknown rows without changing their result or time.
+
+        Older worker-failure observations stored the relational lane/scenario
+        keys but left their Observation v1 provenance null. The lane allowlist
+        is authoritative for those immutable identity fields. Preserve the
+        observation ID, timestamps, result, eligibility, and failure layer.
+        """
+        rows = self.db.execute(
+            "SELECT observation_id,lane_id,scenario_id,payload FROM observations"
+        ).fetchall()
+        for row in rows:
+            lane = lanes.get(row["lane_id"])
+            observation_scenario_id = scenario_ids.get(row["scenario_id"])
+            if lane is None or observation_scenario_id is None:
+                continue
+            payload = json.loads(row["payload"])
+            subject = payload.setdefault("subject", {})
+            lane_payload = payload.setdefault("lane", {})
+            changed = False
+            for key, value in (
+                ("instance_id", lane["instance_id"]),
+                ("node_id", lane["node_id"]),
+                ("runtime", runtime),
+                ("image_identity", lane["image_identity"]),
+                ("config_digest", lane["config_digest"]),
+            ):
+                if subject.get(key) in (None, ""):
+                    subject[key] = value
+                    changed = True
+            for key in (
+                "composition",
+                "transport",
+                "substrate_profile",
+                "requested_region",
+            ):
+                if lane_payload.get(key) in (None, "") and lane.get(key) is not None:
+                    lane_payload[key] = lane[key]
+                    changed = True
+            if payload.get("scenario_id") != observation_scenario_id:
+                payload["scenario_id"] = observation_scenario_id
+                changed = True
+            if changed:
+                clean = sanitize_observation(payload)
+                self.db.execute(
+                    "UPDATE observations SET payload=? WHERE observation_id=?",
+                    (
+                        json.dumps(clean, separators=(",", ":")),
+                        row["observation_id"],
+                    ),
+                )
 
     def _supersede_duplicate_pending_tasks(self, now: str) -> None:
         """Keep only the oldest queued/running copy of each lane/scenario cell.
