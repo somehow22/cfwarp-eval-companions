@@ -17,6 +17,7 @@ def test_safe_environment_uses_ephemeral_browser_home(monkeypatch):
     monkeypatch.setenv(
         "AGENT_BROWSER_EXECUTABLE_PATH", "/usr/local/bin/agent-browser-chrome"
     )
+    monkeypatch.setenv("CFWARP_EVAL_CONTRACTS_ROOT", "/app/contracts")
     monkeypatch.setenv("HTTP_PROXY", "http://ambient.invalid")
 
     environment = safe_environment()
@@ -26,6 +27,7 @@ def test_safe_environment_uses_ephemeral_browser_home(monkeypatch):
         "/usr/local/bin/agent-browser-chrome"
     )
     assert environment["AGENT_BROWSER_DOWNLOADS_DISABLED"] == "1"
+    assert environment["CFWARP_EVAL_CONTRACTS_ROOT"] == "/app/contracts"
     assert "HTTP_PROXY" not in environment
 
 

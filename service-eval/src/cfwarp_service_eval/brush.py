@@ -130,6 +130,7 @@ class ScenarioEvaluator:
                 "latency_ms": 0,
                 "artifacts": [],
                 "error_type": type(error).__name__,
+                "error_message": redact_error(error),
             }
 
 
@@ -315,6 +316,10 @@ def finish(result: dict[str, Any], started: datetime) -> dict[str, Any]:
     result["finished_at"] = finished.isoformat()
     result["elapsed_ms"] = round((finished - started).total_seconds() * 1000)
     return result
+
+
+def redact_error(error: Exception) -> str:
+    return " ".join(part for part in str(error).split() if "://" not in part)[:300]
 
 
 def parser() -> argparse.ArgumentParser:

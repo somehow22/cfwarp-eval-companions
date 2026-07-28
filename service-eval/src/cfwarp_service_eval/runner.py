@@ -208,6 +208,7 @@ def safe_environment() -> dict[str, str]:
         "XDG_CACHE_HOME",
         "XDG_RUNTIME_DIR",
         "AGENT_BROWSER_EXECUTABLE_PATH",
+        "CFWARP_EVAL_CONTRACTS_ROOT",
         "AWS_PROFILE",
         "AGENTCORE_REGION",
         "AGENTCORE_BROWSER_ID",

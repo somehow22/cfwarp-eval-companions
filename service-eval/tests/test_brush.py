@@ -9,6 +9,7 @@ from cfwarp_service_eval.brush import (
     BrushError,
     BrushRequest,
     BrushRunner,
+    ScenarioEvaluator,
     ensure_brushable,
 )
 from cfwarp_service_eval.capabilities import require_scenario_capability
@@ -76,6 +77,11 @@ class FakeEvaluator:
         return self.observations.pop(0)
 
 
+class FailingProbeRunner:
+    async def run(self, run_id: str, lane: Lane, scenario_id: str) -> dict:
+        raise RuntimeError("failed through socks5h://secret.invalid:1080 safely")
+
+
 def run(control: FakeControl, evaluator: FakeEvaluator, attempts: int = 3) -> dict:
     return asyncio.run(
         BrushRunner(control, evaluator).run(
@@ -120,6 +126,15 @@ def test_baseline_unknown_does_not_mutate_egress():
     )
     assert result["outcome"] == "unknown"
     assert control.prepared == []
+
+
+def test_tooling_observation_has_bounded_redacted_error():
+    result = asyncio.run(
+        ScenarioEvaluator(FailingProbeRunner()).evaluate("run", lane(), "youtube")
+    )
+    assert result["result"]["availability"] == "unknown"
+    assert result["error_type"] == "RuntimeError"
+    assert result["error_message"] == "failed through safely"
 
 
 def test_unchanged_ip_rolls_back_without_expensive_probe():
