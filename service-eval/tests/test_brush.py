@@ -30,14 +30,18 @@ def lane() -> Lane:
     )
 
 
-def observation(availability: str, eligible: bool = True) -> dict:
+def observation(
+    availability: str,
+    eligible: bool = True,
+    scenario_id: str = "youtube.anonymous_public_video",
+) -> dict:
     now = datetime.now(timezone.utc)
     return {
         "schema_version": 1,
         "observation_id": "example",
         "observed_at": now.isoformat(),
         "fresh_until": (now + timedelta(hours=1)).isoformat(),
-        "scenario_id": "youtube.anonymous_public_video",
+        "scenario_id": scenario_id,
         "result": {"availability": availability, "class": "test", "eligible": eligible},
     }
 
@@ -68,7 +72,7 @@ class FakeEvaluator:
         self.calls: list[str] = []
 
     async def evaluate(self, run_id: str, lane: Lane, scenario_id: str) -> dict:
-        self.calls.append(run_id)
+        self.calls.append(f"{run_id}:{scenario_id}")
         return self.observations.pop(0)
 
 
@@ -89,36 +93,82 @@ def trial(number: int, changed: bool) -> dict:
     }
 
 
+def perf_observation(availability: str = "available") -> dict:
+    return observation(
+        availability,
+        eligible=False,
+        scenario_id="perf.throughput_sample",
+    )
+
+
 def test_baseline_pass_does_not_mutate_egress():
     control = FakeControl([])
-    result = run(control, FakeEvaluator([observation("available")]))
+    result = run(
+        control,
+        FakeEvaluator([observation("available"), perf_observation()]),
+    )
     assert result["outcome"] == "already_satisfied"
     assert control.prepared == []
+    assert result["performance_before"]["scenario_id"] == "perf.throughput_sample"
 
 
 def test_baseline_unknown_does_not_mutate_egress():
     control = FakeControl([])
-    result = run(control, FakeEvaluator([observation("unknown", False)]))
+    result = run(
+        control,
+        FakeEvaluator([observation("unknown", False), perf_observation()]),
+    )
     assert result["outcome"] == "unknown"
     assert control.prepared == []
 
 
 def test_unchanged_ip_rolls_back_without_expensive_probe():
     control = FakeControl([trial(1, False)])
-    evaluator = FakeEvaluator([observation("unavailable")])
+    evaluator = FakeEvaluator([observation("unavailable"), perf_observation()])
     result = run(control, evaluator, attempts=1)
     assert result["outcome"] == "failed"
     assert control.rolled_back == ["trial-1"]
-    assert len(evaluator.calls) == 1
+    assert len(evaluator.calls) == 2
 
 
 def test_service_pass_commits_changed_candidate():
     control = FakeControl([trial(1, True)])
-    evaluator = FakeEvaluator([observation("unavailable"), observation("available")])
+    evaluator = FakeEvaluator(
+        [
+            observation("unavailable"),
+            perf_observation(),
+            observation("available"),
+            perf_observation(),
+        ]
+    )
     result = run(control, evaluator)
     assert result["outcome"] == "succeeded"
     assert control.committed == ["trial-1"]
     assert control.rolled_back == []
+    assert (
+        result["attempts"][0]["performance_after"]["scenario_id"]
+        == "perf.throughput_sample"
+    )
+
+
+def test_performance_unknown_never_blocks_service_acceptance():
+    control = FakeControl([trial(1, True)])
+    evaluator = FakeEvaluator(
+        [
+            observation("unavailable"),
+            perf_observation("unknown"),
+            observation("available"),
+            perf_observation("unknown"),
+        ]
+    )
+    result = run(control, evaluator)
+    assert result["outcome"] == "succeeded"
+    assert control.committed == ["trial-1"]
+    assert result["performance_before"]["result"]["availability"] == "unknown"
+    assert (
+        result["attempts"][0]["performance_after"]["result"]["availability"]
+        == "unknown"
+    )
 
 
 def test_service_failure_rolls_back_then_tries_fresh_identity():
@@ -126,8 +176,11 @@ def test_service_failure_rolls_back_then_tries_fresh_identity():
     evaluator = FakeEvaluator(
         [
             observation("unavailable"),
+            perf_observation(),
             observation("unavailable"),
+            perf_observation(),
             observation("available"),
+            perf_observation(),
         ]
     )
     result = run(control, evaluator)
@@ -142,8 +195,10 @@ def test_tooling_failure_retries_same_candidate_once_then_stops_unknown():
     evaluator = FakeEvaluator(
         [
             observation("unavailable"),
+            perf_observation(),
             observation("unknown", False),
             observation("unknown", False),
+            perf_observation("unknown"),
         ]
     )
     result = run(control, evaluator)
@@ -159,7 +214,7 @@ def test_expired_observation_fails_closed():
         datetime.now(timezone.utc) - timedelta(seconds=1)
     ).isoformat()
     control = FakeControl([])
-    result = run(control, FakeEvaluator([expired]))
+    result = run(control, FakeEvaluator([expired, perf_observation()]))
     assert result["outcome"] == "unknown"
     assert control.prepared == []
 

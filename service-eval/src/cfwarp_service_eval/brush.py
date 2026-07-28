@@ -174,6 +174,9 @@ class BrushRunner:
             f"{run_id}/baseline", request.lane, request.scenario_id
         )
         result["baseline"] = baseline
+        result["performance_before"] = await self.evaluator.evaluate(
+            f"{run_id}/perf-before", request.lane, "perf"
+        )
         baseline_state = observation_state(baseline, definition["scenario_id"])
         if baseline_state == "available":
             result["outcome"] = "already_satisfied"
@@ -223,6 +226,9 @@ class BrushRunner:
                     )
                     state = observation_state(observation, definition["scenario_id"])
                 attempt["observation"] = observation
+                attempt["performance_after"] = await self.evaluator.evaluate(
+                    f"{run_id}/attempt-{number}-perf", request.lane, "perf"
+                )
                 if state == "available":
                     committed = await self.control.commit(str(trial["trial_id"]))
                     attempt["outcome"] = "succeeded"

@@ -31,7 +31,9 @@ More companions may land here. Each one owns its own directory and Dockerfile.
 The same image also provides `cfwarp-brush`, a bounded test coordinator. It
 uses the canonical scenario implementations while controlling a cfwarp
 instance through its mounted local Unix socket. The evaluator API remains
-probe-only and independently scheduled.
+probe-only and independently scheduled. Brush results include canonical
+pre/candidate `perf` observations as evidence only; service acceptance is never
+derived from performance.
 
 ## The observation envelope
 

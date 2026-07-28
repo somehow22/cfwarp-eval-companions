@@ -170,6 +170,8 @@ candidates are evaluated through the same canonical runner; eligible passes
 commit, eligible failures roll back, and an evaluator failure gets one retry on
 the same candidate before rollback.
 
-`perf` is intentionally observation-only and cannot gate brushing. Browser
-scenarios require an explicitly enabled local or cloud browser runtime before
-the command starts.
+Every brush run records `performance_before`; every changed-IP candidate also
+records `performance_after`. Both use the canonical `perf` scenario, and
+neither can approve, reject, commit, or roll back a candidate. `perf` cannot be
+selected as the gate scenario. Browser scenarios require an explicitly enabled
+local or cloud browser runtime before the command starts.
