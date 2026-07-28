@@ -82,10 +82,20 @@ class FailingProbeRunner:
         raise RuntimeError("failed through socks5h://secret.invalid:1080 safely")
 
 
-def run(control: FakeControl, evaluator: FakeEvaluator, attempts: int = 3) -> dict:
+def run(
+    control: FakeControl,
+    evaluator: FakeEvaluator,
+    attempts: int = 3,
+    force_change: bool = False,
+) -> dict:
     return asyncio.run(
         BrushRunner(control, evaluator).run(
-            BrushRequest(lane(), "youtube", attempts=attempts)
+            BrushRequest(
+                lane(),
+                "youtube",
+                attempts=attempts,
+                force_change=force_change,
+            )
         )
     )
 
@@ -116,6 +126,23 @@ def test_baseline_pass_does_not_mutate_egress():
     assert result["outcome"] == "already_satisfied"
     assert control.prepared == []
     assert result["performance_before"]["scenario_id"] == "perf.throughput_sample"
+
+
+def test_forced_change_rotates_and_revalidates_a_passing_baseline():
+    control = FakeControl([trial(1, True)])
+    evaluator = FakeEvaluator(
+        [
+            observation("available"),
+            perf_observation(),
+            observation("available"),
+            perf_observation(),
+        ]
+    )
+    result = run(control, evaluator, force_change=True)
+    assert result["force_change"] is True
+    assert result["outcome"] == "succeeded"
+    assert control.prepared == ["reconnect"]
+    assert control.committed == ["trial-1"]
 
 
 def test_baseline_unknown_does_not_mutate_egress():

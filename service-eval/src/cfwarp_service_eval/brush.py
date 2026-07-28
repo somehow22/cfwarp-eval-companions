@@ -141,6 +141,7 @@ class BrushRequest:
     attempts: int = 3
     strategy: str = "auto"
     lease_seconds: int = 900
+    force_change: bool = False
 
 
 class BrushRunner:
@@ -167,6 +168,7 @@ class BrushRunner:
             "strategy": request.strategy,
             "attempts_requested": request.attempts,
             "attempts": [],
+            "force_change": request.force_change,
             "started_at": started.isoformat(),
             "outcome": "failed",
         }
@@ -179,7 +181,7 @@ class BrushRunner:
             f"{run_id}/perf-before", request.lane, "perf"
         )
         baseline_state = observation_state(baseline, definition["scenario_id"])
-        if baseline_state == "available":
+        if baseline_state == "available" and not request.force_change:
             result["outcome"] = "already_satisfied"
             return finish(result, started)
         if baseline_state == "unknown":
@@ -342,6 +344,11 @@ def parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--lease-seconds", type=int, default=900)
     run.add_argument(
+        "--force-change",
+        action="store_true",
+        help="require a changed WARP IP even when the baseline service is available",
+    )
+    run.add_argument(
         "--browser-execution",
         choices=["disabled", "local", "agentcore"],
         default="disabled",
@@ -384,6 +391,7 @@ def main() -> int:
                 attempts=args.attempts,
                 strategy=args.strategy,
                 lease_seconds=args.lease_seconds,
+                force_change=args.force_change,
             )
         )
     )
