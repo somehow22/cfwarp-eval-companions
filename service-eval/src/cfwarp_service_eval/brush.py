@@ -149,6 +149,16 @@ class BrushRunner:
         self.control = control
         self.evaluator = evaluator
 
+    async def rollback(self, trial_id: str) -> dict[str, Any]:
+        try:
+            return await self.control.rollback(trial_id)
+        except Exception:
+            # A restored listener can be briefly unavailable while the cfwarp
+            # runtime finishes settling. The core rollback is transactional and
+            # safe to repeat for the same active trial, so retry once before
+            # classifying the operation as a route-runtime failure.
+            return await self.control.rollback(trial_id)
+
     async def run(self, request: BrushRequest) -> dict[str, Any]:
         definition = ensure_brushable(request.scenario_id)
         if request.attempts < 1 or request.attempts > 10:
@@ -207,7 +217,7 @@ class BrushRunner:
                     "candidate_public_ip_hash"
                 )
                 if not attempt["public_ip_changed"]:
-                    await self.control.rollback(str(trial["trial_id"]))
+                    await self.rollback(str(trial["trial_id"]))
                     attempt["rollback"] = "succeeded"
                     attempt["failure_layer"] = "warp-core"
                     attempt["reason"] = "listener-facing public IP did not change"
@@ -241,7 +251,7 @@ class BrushRunner:
                     result["attempts_used"] = number
                     return finish(result, started)
 
-                await self.control.rollback(str(trial["trial_id"]))
+                await self.rollback(str(trial["trial_id"]))
                 attempt["rollback"] = "succeeded"
                 if state == "unknown":
                     attempt["outcome"] = "unknown"
@@ -256,7 +266,7 @@ class BrushRunner:
             except Exception as error:
                 if trial is not None and trial.get("trial_id"):
                     try:
-                        await self.control.rollback(str(trial["trial_id"]))
+                        await self.rollback(str(trial["trial_id"]))
                         attempt["rollback"] = "succeeded"
                     except Exception:
                         attempt["rollback"] = "failed"

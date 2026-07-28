@@ -67,6 +67,18 @@ class FakeControl:
         return {"trial_id": trial_id, "status": "rolled_back"}
 
 
+class FlakyRollbackControl(FakeControl):
+    def __init__(self, trials: list[dict]):
+        super().__init__(trials)
+        self.rollback_attempts = 0
+
+    async def rollback(self, trial_id: str) -> dict:
+        self.rollback_attempts += 1
+        if self.rollback_attempts == 1:
+            raise BrushError("restored listener is still settling")
+        return await super().rollback(trial_id)
+
+
 class FakeEvaluator:
     def __init__(self, observations: list[dict]):
         self.observations = list(observations)
@@ -171,6 +183,17 @@ def test_unchanged_ip_rolls_back_without_expensive_probe():
     assert result["outcome"] == "failed"
     assert control.rolled_back == ["trial-1"]
     assert len(evaluator.calls) == 2
+
+
+def test_transient_rollback_failure_is_retried_before_next_attempt():
+    control = FlakyRollbackControl([trial(1, False), trial(2, False)])
+    evaluator = FakeEvaluator([observation("unavailable"), perf_observation()])
+    result = run(control, evaluator, attempts=2)
+    assert result["outcome"] == "failed"
+    assert result["failure_layer"] == "warp-core"
+    assert control.rollback_attempts == 3
+    assert control.rolled_back == ["trial-1", "trial-2"]
+    assert control.prepared == ["reconnect", "refresh_identity"]
 
 
 def test_service_pass_commits_changed_candidate():
