@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "observation_id": "b857c580-ef6d-4684-bad1-c01e1307cac9",
+  "observed_at": "2026-07-28T00:00:00Z",
+  "fresh_until": "2026-07-29T00:00:00Z",
+  "scenario_id": "gemini.anonymous_entry",
+  "probe": {
+    "name": "browser-scenario",
+    "version": "1",
+    "execution": "local"
+  },
+  "subject": {},
+  "lane": {},
+  "egress": {
+    "warp": "on",
+    "region": "DE",
+    "colo": "FRA"
+  },
+  "result": {
+    "availability": "unknown",
+    "class": "tooling_failure",
+    "eligible": true
+  },
+  "confidence_stage": "single_observation",
+  "failure_layer": "tooling",
+  "latency_ms": 100,
+  "artifacts": []
+}

@@ -3,7 +3,12 @@ import sys
 
 import pytest
 
-from cfwarp_service_eval.runner import ProbeError, ProbeRunner, safe_environment
+from cfwarp_service_eval.runner import (
+    ProbeError,
+    ProbeRunner,
+    enforce_artifact_limit,
+    safe_environment,
+)
 
 
 def test_safe_environment_uses_ephemeral_browser_home(monkeypatch):
@@ -33,3 +38,12 @@ def test_subprocess_deadline_kills_the_process_group(tmp_path):
                 timeout=0.01,
             )
         )
+
+
+def test_artifact_limit_fails_closed(tmp_path):
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "bounded.json").write_bytes(b"x" * 32)
+    enforce_artifact_limit(output, 32)
+    with pytest.raises(ProbeError, match="exceed contract limit"):
+        enforce_artifact_limit(output, 31)

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "observation_id": "d5b4bec4-8dc3-4d2f-bd52-30255b1ea92d",
+  "observed_at": "2026-07-28T00:00:00Z",
+  "fresh_until": "2026-07-29T00:00:00Z",
+  "scenario_id": "youtube.anonymous_public_video",
+  "probe": {
+    "name": "youtube-yt-dlp",
+    "version": "1",
+    "execution": "local"
+  },
+  "subject": {
+    "instance_id": "example-lane"
+  },
+  "lane": {
+    "composition": "direct-warp"
+  },
+  "egress": {
+    "warp": "on",
+    "region": "DE",
+    "colo": "FRA"
+  },
+  "result": {
+    "availability": "available",
+    "class": "pass",
+    "eligible": true
+  },
+  "confidence_stage": "single_observation",
+  "failure_layer": "none",
+  "latency_ms": 1234,
+  "artifacts": [
+    {"kind": "summary", "path": "summary.json"},
+    {"kind": "verdict", "path": "verdict.txt"}
+  ]
+}

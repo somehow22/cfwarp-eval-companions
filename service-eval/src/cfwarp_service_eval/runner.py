@@ -7,7 +7,7 @@ import signal
 from pathlib import Path
 from typing import Any
 
-from .config import DIRECT_THROUGHPUT_FLOOR_MIBPS, Lane
+from .config import DIRECT_THROUGHPUT_FLOOR_MIBPS, SCENARIO_DEFINITIONS, Lane
 
 
 class ProbeError(RuntimeError):
@@ -159,6 +159,10 @@ class ProbeRunner:
             if self.browser_execution == "agentcore":
                 command += ["--browser-provider", "agentcore"]
         await self._run(command, self.deadline_seconds + 15, check=False)
+        enforce_artifact_limit(
+            output,
+            int(SCENARIO_DEFINITIONS[scenario_id]["artifact_limit_bytes"]),
+        )
         summary_path = output / "summary.json"
         if not summary_path.is_file():
             raise ProbeError("probe exited without a summary")
@@ -221,3 +225,15 @@ def parse_trace(body: str) -> dict[str, str]:
 
 def redact(message: str) -> str:
     return " ".join(part for part in message.split() if "://" not in part)[:300]
+
+
+def enforce_artifact_limit(output: Path, limit_bytes: int) -> None:
+    total = sum(
+        path.stat().st_size
+        for path in output.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    )
+    if total > limit_bytes:
+        raise ProbeError(
+            f"scenario artifacts exceed contract limit: {total} > {limit_bytes} bytes"
+        )

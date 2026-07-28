@@ -26,6 +26,7 @@ COPY --from=deno /deno /usr/local/bin/deno
 COPY --from=uv /uv /uvx /usr/local/bin/
 
 ENV HOME=/home/probe \
+    CFWARP_EVAL_CONTRACTS_ROOT=/app/contracts \
     XDG_CACHE_HOME=/opt/probe-cache \
     AGENT_BROWSER_RUNTIME_HOME=/tmp \
     AGENT_BROWSER_EXECUTABLE_PATH=/usr/local/bin/agent-browser-chrome \
@@ -38,14 +39,15 @@ ENV HOME=/home/probe \
 RUN apt-get update && apt-get install --yes --no-install-recommends ca-certificates curl sudo && \
     rm -rf /var/lib/apt/lists/* && \
     npm install --global "agent-browser@${AGENT_BROWSER_VERSION}" && \
-    install -d -m 0755 /opt/probe-cache /app/service-eval /home/probe && \
+    install -d -m 0755 /opt/probe-cache /app/service-eval /home/probe /var/lib/cfwarp-brush && \
     HOME=/home/probe XDG_CACHE_HOME=/opt/probe-cache agent-browser install --with-deps && \
     ln -s "$(find /home/probe/.agent-browser/browsers -mindepth 2 -maxdepth 2 -type f -name chrome -print -quit)" /usr/local/bin/agent-browser-chrome && \
     /usr/sbin/useradd --uid 10001 --home-dir /home/probe --shell /usr/sbin/nologin probe && \
-    chown -R probe:probe /home/probe /opt/probe-cache && \
+    chown -R probe:probe /home/probe /opt/probe-cache /var/lib/cfwarp-brush && \
     SUDO_FORCE_REMOVE=yes apt-get purge --yes sudo && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app/service-eval
+COPY contracts /app/contracts
 COPY service-eval/pyproject.toml service-eval/uv.lock service-eval/README.md ./
 COPY service-eval/src ./src
 COPY service-eval/browser ./browser

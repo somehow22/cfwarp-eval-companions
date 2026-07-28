@@ -8,25 +8,18 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .contracts import scenario_definitions
 
 LANE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+SCENARIO_DEFINITIONS = scenario_definitions()
 SCENARIOS = {
-    "turnstile-reference": "turnstile-reference.interactive_test_widget_render",
-    "youtube": "youtube.anonymous_public_video",
-    "gemini": "gemini.anonymous_entry",
-    "chatgpt": "chatgpt.anonymous_entry",
-    "google-search": "google-search.anonymous_search_results",
-    "reddit": "reddit.anonymous_public_listing",
-    "perf": "perf.throughput_sample",
+    scenario_id: definition["scenario_id"]
+    for scenario_id, definition in SCENARIO_DEFINITIONS.items()
 }
 BROWSER_SCENARIOS = frozenset(
-    {
-        "turnstile-reference",
-        "gemini",
-        "chatgpt",
-        "google-search",
-        "reddit",
-    }
+    scenario_id
+    for scenario_id, definition in SCENARIO_DEFINITIONS.items()
+    if definition["execution_class"] == "browser"
 )
 LIGHTWEIGHT_SCENARIOS = frozenset(SCENARIOS) - BROWSER_SCENARIOS
 

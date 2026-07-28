@@ -15,9 +15,11 @@ dependencies = [
 [project.scripts]
 cfwarp-service-eval = "cfwarp_service_eval.cli:main"
 cfwarp-service-eval-api = "cfwarp_service_eval.api:main"
+cfwarp-brush = "cfwarp_service_eval.brush:main"
 
 [dependency-groups]
 dev = [
+  "jsonschema[format]>=4.25.1,<5",
   "pytest>=8.4.1,<9",
   "ruff>=0.15.21,<0.16",
 ]

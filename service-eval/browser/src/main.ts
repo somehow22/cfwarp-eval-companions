@@ -10,6 +10,7 @@ import {
   type TraceEvidence,
 } from "./agent_browser.ts"
 import { classify } from "./classify.ts"
+import { resultForClass } from "./contracts.ts"
 import { isServiceName, type Scenario, scenarios, type ServiceName } from "./scenarios.ts"
 
 interface Options {
@@ -394,14 +395,7 @@ async function finish(
 }
 
 export function buildObservation(summary: Summary): Observation {
-  const successful = ["available", "available_login_required", "challenge_reference_rendered"]
-    .includes(summary.verdict)
-  const evaluatorFailure = [
-    "unknown",
-    "tooling_failure",
-    "tooling_or_network_failure",
-    "probe_deadline_exceeded",
-  ].includes(summary.verdict)
+  const contracted = resultForClass(summary.verdict)
   const finished = new Date(summary.finished_at!)
   const input = summary.input
   const trace = summary.trace
@@ -437,9 +431,9 @@ export function buildObservation(summary: Summary): Observation {
       colo: trace?.colo ?? null,
     },
     result: {
-      availability: successful ? "available" : evaluatorFailure ? "unknown" : "unavailable",
+      availability: contracted.availability,
       class: summary.verdict,
-      eligible: !evaluatorFailure,
+      eligible: contracted.eligible,
     },
     confidence_stage: "single_observation",
     failure_layer: summary.failure_layer === "none" ? "none" : summary.failure_layer,

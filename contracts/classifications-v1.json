@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "classes": {
+    "pass": {"availability": "available", "eligible": true},
+    "pass_with_tooling_caveat": {"availability": "available", "eligible": true},
+    "available": {"availability": "available", "eligible": true},
+    "available_login_required": {"availability": "available", "eligible": true},
+    "challenge_reference_rendered": {"availability": "available", "eligible": true},
+    "challenge": {"availability": "unavailable", "eligible": true},
+    "blocked": {"availability": "unavailable", "eligible": true},
+    "unavailable": {"availability": "unavailable", "eligible": true},
+    "auth_required": {"availability": "unavailable", "eligible": true},
+    "service_unavailable": {"availability": "unavailable", "eligible": true},
+    "bot_challenge": {"availability": "unavailable", "eligible": true},
+    "consent_challenge": {"availability": "unavailable", "eligible": true},
+    "network_failure": {"availability": "unavailable", "eligible": true},
+    "media_transfer_failure": {"availability": "unavailable", "eligible": true},
+    "tunnel_failure": {"availability": "unavailable", "eligible": true},
+    "listener_not_on_warp": {"availability": "unavailable", "eligible": true},
+    "degraded_throughput": {"availability": "unavailable", "eligible": true},
+    "tooling_failure": {"availability": "unknown", "eligible": false},
+    "tooling_or_network_failure": {"availability": "unknown", "eligible": false},
+    "probe_deadline_exceeded": {"availability": "unknown", "eligible": false},
+    "extractor_failure": {"availability": "unknown", "eligible": false},
+    "unknown": {"availability": "unknown", "eligible": false}
+  }
+}

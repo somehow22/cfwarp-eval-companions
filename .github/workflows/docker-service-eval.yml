@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ["v*"]
     paths:
+      - contracts/**
       - service-eval/**
       - .github/workflows/docker-service-eval.yml
   workflow_dispatch:

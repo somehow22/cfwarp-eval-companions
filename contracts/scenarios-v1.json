@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {
+      "id": "youtube",
+      "scenario_id": "youtube.anonymous_public_video",
+      "version": "1",
+      "execution_class": "lightweight",
+      "runner": "python:youtube",
+      "runtime_prerequisites": {"commands": ["curl"], "network": true},
+      "minimum_memory_mib": null,
+      "deadline_seconds": 120,
+      "freshness_seconds": 86400,
+      "artifact_limit_bytes": 2097152,
+      "remediation_role": "gate"
+    },
+    {
+      "id": "gemini",
+      "scenario_id": "gemini.anonymous_entry",
+      "version": "1",
+      "execution_class": "browser",
+      "runner": "deno:gemini",
+      "runtime_prerequisites": {"commands": ["deno", "agent-browser"], "browser_execution": ["local", "agentcore"], "minimum_memory_mib_local": 768, "network": true},
+      "minimum_memory_mib": 768,
+      "deadline_seconds": 300,
+      "freshness_seconds": 86400,
+      "artifact_limit_bytes": 2097152,
+      "remediation_role": "gate"
+    },
+    {
+      "id": "chatgpt",
+      "scenario_id": "chatgpt.anonymous_entry",
+      "version": "1",
+      "execution_class": "browser",
+      "runner": "deno:chatgpt",
+      "runtime_prerequisites": {"commands": ["deno", "agent-browser"], "browser_execution": ["local", "agentcore"], "minimum_memory_mib_local": 768, "network": true},
+      "minimum_memory_mib": 768,
+      "deadline_seconds": 300,
+      "freshness_seconds": 86400,
+      "artifact_limit_bytes": 2097152,
+      "remediation_role": "gate"
+    },
+    {
+      "id": "google-search",
+      "scenario_id": "google-search.anonymous_search_results",
+      "version": "1",
+      "execution_class": "browser",
+      "runner": "deno:google-search",
+      "runtime_prerequisites": {"commands": ["deno", "agent-browser"], "browser_execution": ["local", "agentcore"], "minimum_memory_mib_local": 768, "network": true},
+      "minimum_memory_mib": 768,
+      "deadline_seconds": 300,
+      "freshness_seconds": 86400,
+      "artifact_limit_bytes": 2097152,
+      "remediation_role": "gate"
+    },
+    {
+      "id": "reddit",
+      "scenario_id": "reddit.anonymous_public_listing",
+      "version": "1",
+      "execution_class": "browser",
+      "runner": "deno:reddit",
+      "runtime_prerequisites": {"commands": ["deno", "agent-browser"], "browser_execution": ["local", "agentcore"], "minimum_memory_mib_local": 768, "network": true},
+      "minimum_memory_mib": 768,
+      "deadline_seconds": 300,
+      "freshness_seconds": 86400,
+      "artifact_limit_bytes": 2097152,
+      "remediation_role": "gate"
+    },
+    {
+      "id": "turnstile-reference",
+      "scenario_id": "turnstile-reference.interactive_test_widget_render",
+      "version": "1",
+      "execution_class": "browser",
+      "runner": "deno:turnstile-reference",
+      "runtime_prerequisites": {"commands": ["deno", "agent-browser"], "browser_execution": ["local", "agentcore"], "minimum_memory_mib_local": 768, "network": true},
+      "minimum_memory_mib": 768,
+      "deadline_seconds": 300,
+      "freshness_seconds": 86400,
+      "artifact_limit_bytes": 2097152,
+      "remediation_role": "gate"
+    },
+    {
+      "id": "perf",
+      "scenario_id": "perf.throughput_sample",
+      "version": "1",
+      "execution_class": "performance",
+      "runner": "python:perf",
+      "runtime_prerequisites": {"commands": ["curl"], "network": true},
+      "minimum_memory_mib": null,
+      "deadline_seconds": 240,
+      "freshness_seconds": 86400,
+      "artifact_limit_bytes": 2097152,
+      "remediation_role": "observe_only"
+    }
+  ]
+}

@@ -315,7 +315,7 @@ def test_browser_capability_is_optional_and_disabled_by_default(tmp_path, monkey
                 "/v1/scenario-capabilities", headers=auth()
             ).json()
         }
-        assert capabilities["perf"]["execution_class"] == "lightweight"
+        assert capabilities["perf"]["execution_class"] == "performance"
         assert capabilities["chatgpt"]["execution_class"] == "browser"
         assert capabilities["chatgpt"]["enabled"] is False
         assert capabilities["chatgpt"]["execution_target"] == "none"

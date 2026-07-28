@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/somehow22/cfwarp-eval-companions/contracts/observation-v1.schema.json",
+  "title": "cfwarp service observation v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "observation_id",
+    "observed_at",
+    "fresh_until",
+    "scenario_id",
+    "probe",
+    "subject",
+    "lane",
+    "egress",
+    "result",
+    "confidence_stage",
+    "failure_layer",
+    "latency_ms",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "observation_id": {"type": "string", "format": "uuid"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "fresh_until": {"type": "string", "format": "date-time"},
+    "scenario_id": {"type": "string", "minLength": 3},
+    "probe": {
+      "type": "object",
+      "required": ["name", "version", "execution"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "execution": {"type": "string", "minLength": 1}
+      }
+    },
+    "subject": {"type": "object"},
+    "lane": {"type": "object"},
+    "egress": {
+      "type": "object",
+      "required": ["warp", "region", "colo"],
+      "properties": {
+        "warp": {"type": ["string", "null"]},
+        "region": {"type": ["string", "null"]},
+        "colo": {"type": ["string", "null"]}
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["availability", "class", "eligible"],
+      "properties": {
+        "availability": {
+          "enum": ["available", "unavailable", "unknown"]
+        },
+        "class": {"type": "string", "minLength": 1},
+        "eligible": {"type": "boolean"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"availability": {"const": "unknown"}},
+            "required": ["availability"]
+          },
+          "then": {
+            "properties": {"eligible": {"const": false}}
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "availability": {
+                "enum": ["available", "unavailable"]
+              }
+            },
+            "required": ["availability"]
+          },
+          "then": {
+            "properties": {"eligible": {"const": true}}
+          }
+        }
+      ]
+    },
+    "confidence_stage": {
+      "enum": [
+        "single_observation",
+        "canary_window",
+        "recovered_after_fault",
+        "multi_window",
+        "multi_node"
+      ]
+    },
+    "failure_layer": {"type": "string", "minLength": 1},
+    "latency_ms": {"type": ["integer", "null"], "minimum": 0},
+    "artifacts": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["kind", "path"],
+        "properties": {
+          "kind": {"type": "string", "minLength": 1},
+          "path": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+          }
+        }
+      }
+    }
+  }
+}

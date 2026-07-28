@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .contracts import classify_result
+
 
 SPEED_URL = "https://speed.cloudflare.com/__down"
 TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
@@ -167,12 +169,7 @@ def build_observation(
     summary: dict[str, Any], config: PerfConfig, observed_at: datetime
 ) -> dict[str, Any]:
     verdict = summary["verdict"]
-    if verdict == "pass":
-        availability, eligible = "available", True
-    elif verdict in {"tooling_failure", "unknown"}:
-        availability, eligible = "unknown", False
-    else:
-        availability, eligible = "unavailable", True
+    availability, eligible = classify_result(verdict)
     throughput = summary.get("throughput_mibps") or {}
     median = throughput.get("median")
     meets_floor = None

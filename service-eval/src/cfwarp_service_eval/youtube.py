@@ -21,6 +21,7 @@ import yt_dlp
 from yt_dlp.utils import DownloadError
 
 from .classify import classify_failure
+from .contracts import classify_result
 
 
 DEFAULT_SOURCE_URL = "https://www.youtube.com/@aiexplained-official/videos"
@@ -608,12 +609,7 @@ def finish(output: Path, summary: dict[str, Any]) -> dict[str, Any]:
 def build_observation(summary: dict[str, Any], observed_at: datetime) -> dict[str, Any]:
     """Build the backend-independent observation contract shared by service probes."""
     verdict = str(summary["verdict"])
-    if verdict in {"pass", "pass_with_tooling_caveat"}:
-        availability, eligible = "available", True
-    elif verdict in {"tooling_failure", "probe_deadline_exceeded", "unknown"}:
-        availability, eligible = "unknown", False
-    else:
-        availability, eligible = "unavailable", True
+    availability, eligible = classify_result(verdict)
     trace = summary.get("trace") or {}
     inputs = summary.get("input") or {}
     return {

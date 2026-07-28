@@ -7,6 +7,11 @@ right now, and with what evidence?** They are deliberately separate from the
 proxy runtime. A probe that shares a release cycle with the thing it measures
 is not an independent check.
 
+The versioned language-neutral mechanism is under [`contracts/`](contracts/).
+That catalog, classification vocabulary, Observation schema, and its
+conformance fixtures are authoritative across Python, Deno, and future
+implementations.
+
 ## Why this repo is public
 
 The probe image is pulled by nodes that intentionally hold no registry
@@ -22,6 +27,11 @@ in the private runtime project.
 | `service-eval` | Bounded service, throughput, and challenge-reference probes behind one REST API |
 
 More companions may land here. Each one owns its own directory and Dockerfile.
+
+The same image also provides `cfwarp-brush`, a bounded test coordinator. It
+uses the canonical scenario implementations while controlling a cfwarp
+instance through its mounted local Unix socket. The evaluator API remains
+probe-only and independently scheduled.
 
 ## The observation envelope
 

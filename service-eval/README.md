@@ -146,3 +146,30 @@ See [`browser/README.md`](browser/README.md) for the bounded ChatGPT, Gemini,
 Google Search, and Reddit commands and verdict classes. These probes require an
 already-running listener; deployment and region selection remain outside this
 workspace.
+
+## Bounded service brushing
+
+`cfwarp-brush` is a separate test coordinator in this image. It does not add
+probe logic to cfwarp and does not turn the persistent evaluator API into a
+remediation controller.
+
+```bash
+cfwarp-brush run \
+  --lanes-file /etc/cfwarp-service-eval/lanes.json \
+  --lane fv-ro \
+  --scenario youtube \
+  --socket /run/cfwarp/core.sock \
+  --output /var/lib/cfwarp-brush/run \
+  --attempts 3 \
+  --strategy auto
+```
+
+The baseline is evaluated before mutation. An already-available scenario
+returns without rotating. Unknown or expired evidence fails closed. Changed-IP
+candidates are evaluated through the same canonical runner; eligible passes
+commit, eligible failures roll back, and an evaluator failure gets one retry on
+the same candidate before rollback.
+
+`perf` is intentionally observation-only and cannot gate brushing. Browser
+scenarios require an explicitly enabled local or cloud browser runtime before
+the command starts.
