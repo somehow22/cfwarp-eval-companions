@@ -487,6 +487,8 @@ def metrics(_: MetricsProtected) -> str:
         "# TYPE cfwarp_probe_scenario_fresh_seconds gauge",
         "# HELP cfwarp_probe_lane_warp_on Latest listener trace explicitly reported WARP state for this lane.",
         "# TYPE cfwarp_probe_lane_warp_on gauge",
+        "# HELP cfwarp_probe_lane_warp_off Latest listener trace explicitly reported warp=off for this lane.",
+        "# TYPE cfwarp_probe_lane_warp_off gauge",
         "# HELP cfwarp_probe_lane_throughput_mibps Newest sampled lane throughput.",
         "# TYPE cfwarp_probe_lane_throughput_mibps gauge",
         "# HELP cfwarp_probe_lane_performance_band Lane performance band, 1 for the active band.",
@@ -522,6 +524,11 @@ def metrics(_: MetricsProtected) -> str:
         if latest is not None and latest.get("warp") in {"on", "off"}:
             warp_on = 1 if latest["warp"] == "on" else 0
             lines.append(f"cfwarp_probe_lane_warp_on{{{common}}} {warp_on}")
+        # Emit the alert signal for every lane so an unreachable sample can
+        # recover an earlier explicit off result. Zero means only "no explicit
+        # off result"; reachability remains owned by the heartbeat ratio.
+        warp_off = 1 if latest is not None and latest.get("warp") == "off" else 0
+        lines.append(f"cfwarp_probe_lane_warp_off{{{common}}} {warp_off}")
         throughput = tier.get("throughput_mibps")
         if throughput is not None:
             lines.append(f"cfwarp_probe_lane_throughput_mibps{{{common}}} {throughput}")
