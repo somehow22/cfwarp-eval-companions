@@ -285,6 +285,19 @@ def test_warp_state_is_distinguishable_from_unreachability(tmp_path, monkeypatch
         assert 'lane="direct-de"' in series[0]
 
 
+def test_unreachable_heartbeat_does_not_report_warp_off(tmp_path, monkeypatch):
+    with client(tmp_path, monkeypatch) as test_client:
+        store = api.runtime.store
+        store.record_heartbeat("direct-de", {"ok": False, "error": "TimeoutError"})
+        body = test_client.get("/metrics", headers=metrics_auth()).text
+        series = [
+            line
+            for line in body.splitlines()
+            if line.startswith("cfwarp_probe_lane_warp_on{")
+        ]
+        assert series == []
+
+
 def test_node_scenario_allowlist_restricts_scheduling_and_api(tmp_path, monkeypatch):
     # A lightweight profile runs on a small node without any browser runtime.
     monkeypatch.setenv("SERVICE_EVAL_SCENARIOS", "perf,youtube")
