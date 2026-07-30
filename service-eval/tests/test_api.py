@@ -283,6 +283,35 @@ def test_warp_state_is_distinguishable_from_unreachability(tmp_path, monkeypatch
         assert len(series) == 1
         assert series[0].endswith(" 0")
         assert 'lane="direct-de"' in series[0]
+        off_series = [
+            line
+            for line in body.splitlines()
+            if line.startswith("cfwarp_probe_lane_warp_off{")
+        ]
+        assert len(off_series) == 1
+        assert off_series[0].endswith(" 1")
+        assert 'lane="direct-de"' in off_series[0]
+
+
+def test_unreachable_heartbeat_does_not_report_warp_off(tmp_path, monkeypatch):
+    with client(tmp_path, monkeypatch) as test_client:
+        store = api.runtime.store
+        store.record_heartbeat("direct-de", {"ok": False, "error": "TimeoutError"})
+        body = test_client.get("/metrics", headers=metrics_auth()).text
+        series = [
+            line
+            for line in body.splitlines()
+            if line.startswith("cfwarp_probe_lane_warp_on{")
+        ]
+        assert series == []
+        off_series = [
+            line
+            for line in body.splitlines()
+            if line.startswith("cfwarp_probe_lane_warp_off{")
+        ]
+        assert len(off_series) == 1
+        assert off_series[0].endswith(" 0")
+        assert 'lane="direct-de"' in off_series[0]
 
 
 def test_node_scenario_allowlist_restricts_scheduling_and_api(tmp_path, monkeypatch):
