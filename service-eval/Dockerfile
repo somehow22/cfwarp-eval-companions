@@ -69,10 +69,20 @@ ENV XDG_CACHE_HOME=/opt/probe-cache \
     AGENT_BROWSER_DOWNLOADS_DISABLED=1
 COPY service-eval/container/chrome-policy.json /etc/opt/chrome/policies/managed/cfwarp-download-policy.json
 COPY service-eval/container/chrome-policy.json /etc/chromium/policies/managed/cfwarp-download-policy.json
-RUN npm install --global "agent-browser@${AGENT_BROWSER_VERSION}" && \
+RUN apt-get update && apt-get install --yes --no-install-recommends \
+    libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo-gobject2 libcairo2 \
+    libcups2 libdbus-1-3 libdrm2 libfontconfig1 libfreetype6 libgbm1 \
+    libgdk-pixbuf-2.0-0 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 \
+    libpangocairo-1.0-0 libx11-6 libx11-xcb1 libxcb1 libxcb-shm0 \
+    libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 \
+    libxkbcommon0 libxrandr2 libxrender1 libxshmfence1 \
+    fonts-freefont-ttf fonts-noto-cjk fonts-noto-color-emoji && \
+    rm -rf /var/lib/apt/lists/* && \
+    npm install --global "agent-browser@${AGENT_BROWSER_VERSION}" && \
     install -d -o probe -g probe -m 0755 /opt/probe-cache && \
-    HOME=/home/probe XDG_CACHE_HOME=/opt/probe-cache agent-browser install --with-deps && \
-    ln -s "$(find /home/probe/.agent-browser/browsers -mindepth 2 -maxdepth 2 -type f -name chrome -print -quit)" /usr/local/bin/agent-browser-chrome && \
+    HOME=/home/probe XDG_CACHE_HOME=/opt/probe-cache agent-browser install && \
+    browser_binary="$(find /home/probe/.agent-browser/browsers -mindepth 2 -maxdepth 2 -type f -name chrome -print -quit)" && \
+    test -n "$browser_binary" && ln -s "$browser_binary" /usr/local/bin/agent-browser-chrome && \
     deno check --config browser/deno.json browser/src/main.ts && \
     chown -R probe:probe /home/probe /opt/probe-cache
 USER 10001:10001

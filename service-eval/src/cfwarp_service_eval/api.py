@@ -977,6 +977,50 @@ def metrics(_: MetricsProtected) -> str:
                     f"cfwarp_probe_scenario_fresh_seconds{{{label}}} {remaining:.0f}"
                 )
     snapshot = platform_slo_snapshot()
+    # Queue, storage, background-loop, telemetry, and worker facts belong to
+    # this observer, not an individual deployment origin. Emit them once with
+    # an explicit observer scope so aggregating by origin cannot overcount a
+    # single SQLite queue or filesystem.
+    observer_node_ids = {lane.node_id for lane in runtime.lanes.values()}
+    observer_node_id = (
+        next(iter(observer_node_ids)) if len(observer_node_ids) == 1 else "mixed"
+    )
+    observer = f'node_id="{escape_label(observer_node_id)}",scope="observer"'
+    lines.append(f"cfwarp_platform_api_up{{{observer}}} 1")
+    lines.append(
+        f"cfwarp_platform_queue_depth{{{observer}}} {snapshot['queue']['depth']}"
+    )
+    lines.append(
+        f"cfwarp_platform_queue_oldest_age_seconds{{{observer}}} "
+        f"{snapshot['queue']['oldest_age_seconds']}"
+    )
+    lines.append(f"cfwarp_platform_store_bytes{{{observer}}} {snapshot['store_bytes']}")
+    lines.append(
+        f"cfwarp_platform_artifact_bytes{{{observer}}} {snapshot['artifact_bytes']}"
+    )
+    lines.append(
+        f"cfwarp_platform_background_failures{{{observer}}} "
+        f"{len(snapshot['background_failures'])}"
+    )
+    lines.append(
+        f"cfwarp_platform_deployment_inventory_mismatch{{{observer}}} "
+        f"{snapshot['deployment_inventory_mismatch']}"
+    )
+    if snapshot["last_sweep_age_seconds"] is not None:
+        lines.append(
+            f"cfwarp_platform_last_sweep_age_seconds{{{observer}}} "
+            f"{snapshot['last_sweep_age_seconds']}"
+        )
+    if snapshot["telemetry_export_age_seconds"] is not None:
+        lines.append(
+            f"cfwarp_platform_telemetry_export_age_seconds{{{observer}}} "
+            f"{snapshot['telemetry_export_age_seconds']}"
+        )
+    for worker_class, count in snapshot["workers_up"].items():
+        lines.append(
+            f'cfwarp_platform_worker_up{{{observer},worker_class="{worker_class}"}} '
+            f"{1 if count else 0}"
+        )
     origins = {
         (lane.node_id, lane.deployment_origin) for lane in runtime.lanes.values()
     }
@@ -997,7 +1041,6 @@ def metrics(_: MetricsProtected) -> str:
             f'node_id="{escape_label(node_id)}",'
             f'deployment_origin="{escape_label(origin)}"'
         )
-        lines.append(f"cfwarp_platform_api_up{{{platform}}} 1")
         for name in (
             "expected_cells",
             "evaluated_cells",
@@ -1012,48 +1055,12 @@ def metrics(_: MetricsProtected) -> str:
             f"{partition['fresh_cells'] / partition['expected_cells'] if partition['expected_cells'] else 0}"
         )
         lines.append(
-            f"cfwarp_platform_queue_depth{{{platform}}} {snapshot['queue']['depth']}"
-        )
-        lines.append(
-            f"cfwarp_platform_queue_oldest_age_seconds{{{platform}}} "
-            f"{snapshot['queue']['oldest_age_seconds']}"
-        )
-        lines.append(
-            f"cfwarp_platform_store_bytes{{{platform}}} {snapshot['store_bytes']}"
-        )
-        lines.append(
-            f"cfwarp_platform_artifact_bytes{{{platform}}} {snapshot['artifact_bytes']}"
-        )
-        lines.append(
-            f"cfwarp_platform_background_failures{{{platform}}} "
-            f"{len(snapshot['background_failures'])}"
-        )
-        lines.append(
-            f"cfwarp_platform_deployment_inventory_mismatch{{{platform}}} "
-            f"{snapshot['deployment_inventory_mismatch']}"
-        )
-        lines.append(
             f"cfwarp_platform_hard_warp_off{{{platform}}} {partition_warp_off}"
         )
-        if snapshot["last_sweep_age_seconds"] is not None:
-            lines.append(
-                f"cfwarp_platform_last_sweep_age_seconds{{{platform}}} "
-                f"{snapshot['last_sweep_age_seconds']}"
-            )
-        if snapshot["telemetry_export_age_seconds"] is not None:
-            lines.append(
-                f"cfwarp_platform_telemetry_export_age_seconds{{{platform}}} "
-                f"{snapshot['telemetry_export_age_seconds']}"
-            )
         for classification, count in partition["availability"].items():
             lines.append(
                 f'cfwarp_platform_scenario_cells{{{platform},availability="{classification}"}} '
                 f"{count}"
-            )
-        for worker_class, count in snapshot["workers_up"].items():
-            lines.append(
-                f'cfwarp_platform_worker_up{{{platform},worker_class="{worker_class}"}} '
-                f"{1 if count else 0}"
             )
     return "\n".join(lines) + "\n"
 
