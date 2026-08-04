@@ -9,6 +9,7 @@ from cfwarp_service_eval.brush import (
     BrushError,
     BrushRequest,
     BrushRunner,
+    RemediationJournal,
     ScenarioEvaluator,
     ensure_brushable,
 )
@@ -282,6 +283,60 @@ def test_expired_observation_fails_closed():
     result = run(control, FakeEvaluator([expired, perf_observation()]))
     assert result["outcome"] == "unknown"
     assert control.prepared == []
+
+
+def test_remediation_journal_persists_retry_and_enforces_cooldown(tmp_path):
+    journal = RemediationJournal(tmp_path / "remediation.sqlite3")
+    control = FakeControl([trial(1, True)])
+    evaluator = FakeEvaluator(
+        [
+            observation("unavailable"),
+            perf_observation(),
+            observation("unknown", False),
+            observation("unknown", False),
+            perf_observation("unknown"),
+        ]
+    )
+    result = asyncio.run(
+        BrushRunner(control, evaluator, journal).run(BrushRequest(lane(), "youtube"))
+    )
+    assert result["outcome"] == "unknown"
+    event_types = [
+        row[0]
+        for row in journal.db.execute(
+            "SELECT event_type FROM remediation_events ORDER BY id"
+        ).fetchall()
+    ]
+    assert event_types == [
+        "baseline",
+        "performance_before",
+        "deployment_mutation",
+        "candidate_observation",
+        "evaluator_retry",
+        "performance_after",
+        "rollback",
+    ]
+    with pytest.raises(BrushError, match="cooling down"):
+        asyncio.run(
+            BrushRunner(FakeControl([]), FakeEvaluator([]), journal).run(
+                BrushRequest(lane(), "youtube")
+            )
+        )
+
+
+def test_remediation_bounds_attempts_and_deadline():
+    with pytest.raises(BrushError, match="between 1 and 3"):
+        asyncio.run(
+            BrushRunner(FakeControl([]), FakeEvaluator([])).run(
+                BrushRequest(lane(), "youtube", attempts=4)
+            )
+        )
+    with pytest.raises(BrushError, match="between 60 and 900"):
+        asyncio.run(
+            BrushRunner(FakeControl([]), FakeEvaluator([])).run(
+                BrushRequest(lane(), "youtube", deadline_seconds=901)
+            )
+        )
 
 
 def test_performance_is_observation_only():

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import socket
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from .capabilities import memory_limit_mib, require_scenario_capability
 from .contracts import scenario_definitions
 from .config import Lane, load_lanes
 from .runner import ProbeRunner
+from .provenance import observation_v2
 
 
 class BrushError(RuntimeError):
@@ -99,7 +101,7 @@ class ScenarioEvaluator:
         except Exception as error:
             now = datetime.now(timezone.utc)
             definition = scenario_definitions()[scenario_id]
-            return {
+            observation = {
                 "schema_version": 1,
                 "observation_id": str(uuid.uuid4()),
                 "observed_at": now.isoformat(),
@@ -132,6 +134,107 @@ class ScenarioEvaluator:
                 "error_type": type(error).__name__,
                 "error_message": redact_error(error),
             }
+            return observation_v2(
+                observation, lane.public(), scenario_id, build="brush-runner-v2"
+            )
+
+
+class RemediationJournal:
+    """Durable baseline, retry, mutation, and cooldown ledger."""
+
+    def __init__(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(path)
+        with self.db:
+            self.db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS remediation_runs (
+                  run_id TEXT PRIMARY KEY,lane_id TEXT NOT NULL,
+                  scenario_id TEXT NOT NULL,status TEXT NOT NULL,
+                  started_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+                  cooldown_until TEXT,payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_remediation_lane
+                  ON remediation_runs(lane_id,started_at DESC);
+                CREATE TABLE IF NOT EXISTS remediation_events (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,
+                  recorded_at TEXT NOT NULL,event_type TEXT NOT NULL,
+                  payload TEXT NOT NULL,
+                  FOREIGN KEY(run_id) REFERENCES remediation_runs(run_id)
+                );
+                """
+            )
+
+    def assert_available(self, lane_id: str) -> None:
+        row = self.db.execute(
+            """
+            SELECT cooldown_until,status FROM remediation_runs
+            WHERE lane_id=? ORDER BY started_at DESC LIMIT 1
+            """,
+            (lane_id,),
+        ).fetchone()
+        if row is None:
+            return
+        cooldown_until, status = row
+        if status == "running":
+            raise BrushError("another remediation is already running for this lane")
+        if cooldown_until and datetime.fromisoformat(cooldown_until) > datetime.now(
+            timezone.utc
+        ):
+            raise BrushError(f"lane remediation is cooling down until {cooldown_until}")
+
+    def begin(self, result: dict[str, Any]) -> None:
+        self.assert_available(str(result["lane_id"]))
+        now = datetime.now(timezone.utc).isoformat()
+        with self.db:
+            self.db.execute(
+                """
+                INSERT INTO remediation_runs(
+                  run_id,lane_id,scenario_id,status,started_at,updated_at,payload
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    result["run_id"],
+                    result["lane_id"],
+                    result["scenario_id"],
+                    "running",
+                    result["started_at"],
+                    now,
+                    json.dumps(result, separators=(",", ":")),
+                ),
+            )
+
+    def event(self, run_id: str, event_type: str, payload: Any) -> None:
+        with self.db:
+            self.db.execute(
+                """
+                INSERT INTO remediation_events(run_id,recorded_at,event_type,payload)
+                VALUES(?,?,?,?)
+                """,
+                (
+                    run_id,
+                    datetime.now(timezone.utc).isoformat(),
+                    event_type,
+                    json.dumps(payload, separators=(",", ":")),
+                ),
+            )
+
+    def save(self, result: dict[str, Any]) -> None:
+        status = "running" if "finished_at" not in result else str(result["outcome"])
+        with self.db:
+            self.db.execute(
+                """
+                UPDATE remediation_runs SET status=?,updated_at=?,cooldown_until=?,payload=?
+                WHERE run_id=?
+                """,
+                (
+                    status,
+                    datetime.now(timezone.utc).isoformat(),
+                    result.get("cooldown_until"),
+                    json.dumps(result, separators=(",", ":")),
+                    result["run_id"],
+                ),
+            )
 
 
 @dataclass(frozen=True)
@@ -142,12 +245,30 @@ class BrushRequest:
     strategy: str = "auto"
     lease_seconds: int = 900
     force_change: bool = False
+    deadline_seconds: int = 900
+    cooldown_seconds: int = 1800
 
 
 class BrushRunner:
-    def __init__(self, control: Control, evaluator: Evaluator):
+    def __init__(
+        self,
+        control: Control,
+        evaluator: Evaluator,
+        journal: RemediationJournal | None = None,
+    ):
         self.control = control
         self.evaluator = evaluator
+        self.journal = journal
+
+    def event(self, run_id: str, event_type: str, payload: Any) -> None:
+        if self.journal:
+            self.journal.event(run_id, event_type, payload)
+
+    def done(self, result: dict[str, Any], started: datetime) -> dict[str, Any]:
+        completed = finish(result, started)
+        if self.journal:
+            self.journal.save(completed)
+        return completed
 
     async def rollback(self, trial_id: str) -> dict[str, Any]:
         try:
@@ -161,12 +282,16 @@ class BrushRunner:
 
     async def run(self, request: BrushRequest) -> dict[str, Any]:
         definition = ensure_brushable(request.scenario_id)
-        if request.attempts < 1 or request.attempts > 10:
-            raise BrushError("attempts must be between 1 and 10")
+        if request.attempts < 1 or request.attempts > 3:
+            raise BrushError("attempts must be between 1 and 3")
         if request.strategy not in {"auto", "reconnect", "refresh_identity"}:
             raise BrushError("strategy must be auto, reconnect, or refresh_identity")
         if request.lease_seconds < 30 or request.lease_seconds > 1800:
             raise BrushError("lease seconds must be between 30 and 1800")
+        if request.deadline_seconds < 60 or request.deadline_seconds > 900:
+            raise BrushError("deadline seconds must be between 60 and 900")
+        if request.cooldown_seconds != 1800:
+            raise BrushError("cooldown seconds must be 1800")
 
         started = datetime.now(timezone.utc)
         run_id = "brush-" + uuid.uuid4().hex[:16]
@@ -182,22 +307,32 @@ class BrushRunner:
             "started_at": started.isoformat(),
             "outcome": "failed",
         }
+        if self.journal:
+            self.journal.begin(result)
+
+        deadline = time.monotonic() + request.deadline_seconds
+
+        def ensure_deadline() -> None:
+            if time.monotonic() >= deadline:
+                raise BrushError("remediation deadline exhausted")
 
         baseline = await self.evaluator.evaluate(
             f"{run_id}/baseline", request.lane, request.scenario_id
         )
         result["baseline"] = baseline
+        self.event(run_id, "baseline", baseline)
         result["performance_before"] = await self.evaluator.evaluate(
             f"{run_id}/perf-before", request.lane, "perf"
         )
+        self.event(run_id, "performance_before", result["performance_before"])
         baseline_state = observation_state(baseline, definition["scenario_id"])
         if baseline_state == "available" and not request.force_change:
             result["outcome"] = "already_satisfied"
-            return finish(result, started)
+            return self.done(result, started)
         if baseline_state == "unknown":
             result["outcome"] = "unknown"
             result["failure_layer"] = "service-probe"
-            return finish(result, started)
+            return self.done(result, started)
 
         for number in range(1, request.attempts + 1):
             strategy = attempt_strategy(request.strategy, number)
@@ -209,7 +344,15 @@ class BrushRunner:
             }
             trial: dict[str, Any] | None = None
             try:
+                ensure_deadline()
                 trial = await self.control.prepare(strategy, request.lease_seconds)
+                result["cooldown_until"] = (
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=request.cooldown_seconds)
+                ).isoformat()
+                self.event(run_id, "deployment_mutation", trial)
+                if self.journal:
+                    self.journal.save(result)
                 attempt["trial_id"] = trial.get("trial_id")
                 attempt["public_ip_changed"] = bool(trial.get("public_ip_changed"))
                 attempt["before_public_ip_hash"] = trial.get("before_public_ip_hash")
@@ -218,40 +361,48 @@ class BrushRunner:
                 )
                 if not attempt["public_ip_changed"]:
                     await self.rollback(str(trial["trial_id"]))
+                    self.event(run_id, "rollback", {"trial_id": trial["trial_id"]})
                     attempt["rollback"] = "succeeded"
                     attempt["failure_layer"] = "warp-core"
                     attempt["reason"] = "listener-facing public IP did not change"
                     result["attempts"].append(attempt)
                     continue
 
+                ensure_deadline()
                 observation = await self.evaluator.evaluate(
                     f"{run_id}/attempt-{number}",
                     request.lane,
                     request.scenario_id,
                 )
+                self.event(run_id, "candidate_observation", observation)
                 state = observation_state(observation, definition["scenario_id"])
                 if state == "unknown":
                     attempt["evaluator_retried"] = True
+                    ensure_deadline()
                     observation = await self.evaluator.evaluate(
                         f"{run_id}/attempt-{number}-retry",
                         request.lane,
                         request.scenario_id,
                     )
+                    self.event(run_id, "evaluator_retry", observation)
                     state = observation_state(observation, definition["scenario_id"])
                 attempt["observation"] = observation
                 attempt["performance_after"] = await self.evaluator.evaluate(
                     f"{run_id}/attempt-{number}-perf", request.lane, "perf"
                 )
+                self.event(run_id, "performance_after", attempt["performance_after"])
                 if state == "available":
                     committed = await self.control.commit(str(trial["trial_id"]))
+                    self.event(run_id, "commit", committed)
                     attempt["outcome"] = "succeeded"
                     attempt["commit"] = committed.get("status", "succeeded")
                     result["attempts"].append(attempt)
                     result["outcome"] = "succeeded"
                     result["attempts_used"] = number
-                    return finish(result, started)
+                    return self.done(result, started)
 
                 await self.rollback(str(trial["trial_id"]))
+                self.event(run_id, "rollback", {"trial_id": trial["trial_id"]})
                 attempt["rollback"] = "succeeded"
                 if state == "unknown":
                     attempt["outcome"] = "unknown"
@@ -260,13 +411,14 @@ class BrushRunner:
                     result["outcome"] = "unknown"
                     result["failure_layer"] = "service-probe"
                     result["attempts_used"] = number
-                    return finish(result, started)
+                    return self.done(result, started)
                 attempt["failure_layer"] = "service-probe"
                 result["attempts"].append(attempt)
             except Exception as error:
                 if trial is not None and trial.get("trial_id"):
                     try:
                         await self.rollback(str(trial["trial_id"]))
+                        self.event(run_id, "rollback", {"trial_id": trial["trial_id"]})
                         attempt["rollback"] = "succeeded"
                     except Exception:
                         attempt["rollback"] = "failed"
@@ -275,7 +427,7 @@ class BrushRunner:
                 result["attempts"].append(attempt)
                 result["failure_layer"] = "route-runtime"
                 result["attempts_used"] = number
-                return finish(result, started)
+                return self.done(result, started)
 
         result["attempts_used"] = len(result["attempts"])
         result["failure_layer"] = (
@@ -283,7 +435,7 @@ class BrushRunner:
             if result["attempts"]
             else "unknown"
         )
-        return finish(result, started)
+        return self.done(result, started)
 
 
 def ensure_brushable(scenario_id: str) -> dict[str, Any]:
@@ -296,7 +448,7 @@ def ensure_brushable(scenario_id: str) -> dict[str, Any]:
 
 
 def observation_state(observation: dict[str, Any], expected_scenario: str) -> str:
-    if observation.get("schema_version") != 1:
+    if observation.get("schema_version") not in {1, 2}:
         return "unknown"
     if observation.get("scenario_id") != expected_scenario:
         return "unknown"
@@ -353,6 +505,13 @@ def parser() -> argparse.ArgumentParser:
         default="auto",
     )
     run.add_argument("--lease-seconds", type=int, default=900)
+    run.add_argument("--deadline-seconds", type=int, default=900)
+    run.add_argument("--cooldown-seconds", type=int, default=1800)
+    run.add_argument(
+        "--state-db",
+        type=Path,
+        default=Path("/var/lib/cfwarp-brush/remediation.sqlite3"),
+    )
     run.add_argument(
         "--force-change",
         action="store_true",
@@ -391,6 +550,7 @@ def main() -> int:
     runner = BrushRunner(
         UnixControlClient(args.socket),
         ScenarioEvaluator(probe_runner),
+        RemediationJournal(args.state_db),
     )
     started = time.monotonic()
     result = asyncio.run(
@@ -402,6 +562,8 @@ def main() -> int:
                 strategy=args.strategy,
                 lease_seconds=args.lease_seconds,
                 force_change=args.force_change,
+                deadline_seconds=args.deadline_seconds,
+                cooldown_seconds=args.cooldown_seconds,
             )
         )
     )

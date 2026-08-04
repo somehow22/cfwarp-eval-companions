@@ -7,6 +7,11 @@ service and performance evaluation.
   runtime prerequisites, bounds, and whether a scenario may gate remediation.
 - `classifications-v1.json` defines availability and eligibility semantics.
 - `observation-v1.schema.json` defines the cross-runtime evidence envelope.
+- `observation-v2.schema.json` makes deployment origin, canonical capability
+  identity, active config generation, evaluator build, and exact scenario
+  provenance mandatory. V1 remains readable during migration.
+- `egress-verdict-report-v1.schema.json` defines the bounded aggregate consumed
+  by generated docs, Linear reporting, Nexus, and integration skills.
 - `fixtures/` contains conformance vectors used by every implementation.
 
 Implementations may use Python, TypeScript, Go, or another runtime. They must

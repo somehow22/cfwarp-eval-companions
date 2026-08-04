@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from cfwarp_service_eval import api
 from cfwarp_service_eval.runner import ProbeRunner
+from cfwarp_service_eval.provenance import observation_v2
 
 
 TOKEN = "test-token-that-is-longer-than-thirty-two-characters"
@@ -24,10 +25,23 @@ def lane():
         "requested_region": "DE",
         "image_identity": "example@sha256:" + "a" * 64,
         "config_digest": "sha256:" + "b" * 64,
+        "deployment_origin": "cfwarp-pro",
+        "substrate": "direct",
+        "requested_region_raw": "DE",
+        "cloudflare_proto": "warp",
+        "ip_proto_stack": "v4",
+        "config_generation": "generation-1",
     }
 
 
-def client(tmp_path, monkeypatch, lanes_payload=None, heartbeat=False, scheduler=False):
+def client(
+    tmp_path,
+    monkeypatch,
+    lanes_payload=None,
+    heartbeat=False,
+    scheduler=False,
+    embedded=True,
+):
     lanes = tmp_path / "lanes.json"
     lanes.write_text(json.dumps(lanes_payload or [lane()]))
     token = tmp_path / "token"
@@ -42,6 +56,7 @@ def client(tmp_path, monkeypatch, lanes_payload=None, heartbeat=False, scheduler
     # would drive sweeps and muddy a heartbeat-only assertion.
     monkeypatch.setenv("SERVICE_EVAL_HEARTBEAT_ENABLED", "1" if heartbeat else "0")
     monkeypatch.setenv("SERVICE_EVAL_SCHEDULER_ENABLED", "1" if scheduler else "0")
+    monkeypatch.setenv("SERVICE_EVAL_EMBEDDED_WORKER_ENABLED", "1" if embedded else "0")
     monkeypatch.setenv("SERVICE_EVAL_STARTUP_DELAY_SECONDS", "0")
 
     async def preflight(self, group_id, selected_lane):
@@ -85,6 +100,7 @@ def test_lane_response_redacts_proxy_and_post_rejects_ssrf_fields(
     with client(tmp_path, monkeypatch) as test_client:
         response = test_client.get("/v1/lanes", headers=auth())
         assert response.status_code == 200
+        assert test_client.get("/v2/lanes", headers=auth()).json() == response.json()
         assert "proxy" not in response.json()[0]
         response = test_client.post(
             "/v1/run-groups",
@@ -202,6 +218,7 @@ def test_heartbeat_loop_records_samples_without_a_sweep(tmp_path, monkeypatch):
         assert stats["latest"]["warp"] == "on"
         # Heartbeats are lane facts and must not create scenario observations.
         assert test_client.get("/v1/observations/latest", headers=auth()).json() == []
+        assert test_client.get("/v2/observations/latest", headers=auth()).json() == []
 
 
 def test_unknown_lane_and_scenario_are_rejected(tmp_path, monkeypatch):
@@ -246,6 +263,9 @@ def test_worker_failure_preserves_full_lane_and_subject_provenance(
         observation = test_client.get("/v1/observations/latest", headers=auth()).json()[
             0
         ]
+        assert test_client.get("/v2/observations/latest", headers=auth()).json() == [
+            observation
+        ]
         assert observation["scenario_id"] == "youtube.anonymous_public_video"
         assert observation["result"] == {
             "availability": "unknown",
@@ -258,12 +278,21 @@ def test_worker_failure_preserves_full_lane_and_subject_provenance(
             "runtime": "podman",
             "image_identity": "example@sha256:" + "a" * 64,
             "config_digest": "sha256:" + "b" * 64,
+            "config_generation": "generation-1",
+            "deployment_origin": "cfwarp-pro",
+            "evaluator_build": "development",
         }
         assert observation["lane"] == {
+            "lane_id": "direct-de",
+            "capability_id": "direct-DE-warp-v4",
             "composition": "direct",
             "transport": "wireguard",
+            "substrate": "direct",
             "substrate_profile": None,
             "requested_region": "DE",
+            "requested_region_raw": "DE",
+            "cloudflare_proto": "warp",
+            "ip_proto_stack": "v4",
         }
 
 
@@ -332,6 +361,92 @@ def test_node_scenario_allowlist_restricts_scheduling_and_api(tmp_path, monkeypa
         assert "not enabled on this node" in rejected.json()["detail"]
 
 
+def test_leased_worker_completion_is_idempotent_and_discoverable(tmp_path, monkeypatch):
+    monkeypatch.setenv("SERVICE_EVAL_SCENARIOS", "youtube")
+    with client(tmp_path, monkeypatch, embedded=False) as test_client:
+        created = test_client.post(
+            "/v1/run-groups",
+            headers=auth(),
+            json={"lane_ids": ["direct-de"], "scenario_ids": ["youtube"]},
+        )
+        assert created.status_code == 202
+        worker = {
+            "worker_id": "light-1",
+            "worker_class": "light",
+            "node_id": "proxy-host-1",
+            "evaluator_build": "test-build",
+            "metadata": {},
+            "lease_seconds": 240,
+        }
+        claimed = test_client.post(
+            "/v2/jobs/claim", headers=auth(), json=worker
+        ).json()["job"]
+        assert claimed["scenario_id"] == "youtube"
+        now = datetime.now(timezone.utc)
+        raw = {
+            "schema_version": 1,
+            "observation_id": "worker-observation",
+            "observed_at": now.isoformat(),
+            "fresh_until": (now + timedelta(hours=24)).isoformat(),
+            "scenario_id": "youtube.anonymous_public_video",
+            "probe": {},
+            "subject": {},
+            "lane": {},
+            "egress": {"warp": "on", "region": "DE", "colo": "FRA"},
+            "result": {"availability": "available", "class": "pass", "eligible": True},
+            "confidence_stage": "single_observation",
+            "failure_layer": "none",
+            "latency_ms": 10,
+            "artifacts": [],
+        }
+        observation = observation_v2(
+            raw, api.runtime.lanes["direct-de"].public(), "youtube", "test-build"
+        )
+        completion = {
+            "lease_token": claimed["lease_token"],
+            "observation": observation,
+        }
+        accepted = test_client.post(
+            f"/v2/jobs/{claimed['task_id']}/complete",
+            headers=auth(),
+            json=completion,
+        )
+        assert accepted.json() == {"disposition": "accepted"}
+        duplicate = test_client.post(
+            f"/v2/jobs/{claimed['task_id']}/complete",
+            headers=auth(),
+            json=completion,
+        )
+        assert duplicate.json() == {"disposition": "duplicate"}
+        discovered = test_client.get(
+            "/v2/egresses?scenario=youtube", headers=auth()
+        ).json()
+        assert [item["capability_id"] for item in discovered] == ["direct-DE-warp-v4"]
+        metrics = test_client.get("/metrics", headers=metrics_auth()).text
+        assert 'deployment_origin="cfwarp-pro"' in metrics
+        assert 'availability="available"} 1' in metrics
+
+
+def test_worker_loss_does_not_take_down_observer_or_heartbeat_api(
+    tmp_path, monkeypatch
+):
+    with client(tmp_path, monkeypatch, embedded=False) as test_client:
+        assert test_client.get("/healthz").status_code == 200
+        submitted = test_client.post(
+            "/v2/heartbeats",
+            headers=auth(),
+            json={
+                "lane_id": "direct-de",
+                "result": {"ok": True, "checks": {"trace": {"warp": "on"}}},
+            },
+        )
+        assert submitted.status_code == 202
+        snapshot = test_client.get("/v2/platform-slo", headers=auth()).json()
+        assert snapshot["observer_up"] is True
+        assert snapshot["workers_up"]["browser"] == 0
+        assert api.runtime.store.heartbeat_stats("direct-de")["samples"] == 1
+
+
 def test_browser_capability_is_optional_and_disabled_by_default(tmp_path, monkeypatch):
     with client(tmp_path, monkeypatch) as test_client:
         enabled = {
@@ -398,6 +513,20 @@ def test_local_and_cloud_browser_execution_are_explicit(tmp_path, monkeypatch):
         )
         assert capability["enabled"] is True
         assert capability["execution_target"] == "agentcore"
+        assert capability["minimum_memory_mib"] is None
+
+    monkeypatch.setenv("SERVICE_EVAL_BROWSER_EXECUTION", "external")
+    monkeypatch.setattr(api, "memory_limit_mib", lambda: 64)
+    with client(tmp_path, monkeypatch, embedded=False) as test_client:
+        capability = next(
+            row
+            for row in test_client.get(
+                "/v1/scenario-capabilities", headers=auth()
+            ).json()
+            if row["id"] == "chatgpt"
+        )
+        assert capability["enabled"] is True
+        assert capability["execution_target"] == "external-worker"
         assert capability["minimum_memory_mib"] is None
 
 

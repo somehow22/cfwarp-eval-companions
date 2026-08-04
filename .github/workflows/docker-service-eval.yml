@@ -17,6 +17,22 @@ concurrency:
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: observer
+            image: cfwarp-observer
+            smoke: python
+          - target: worker
+            image: cfwarp-eval-worker
+            smoke: python
+          - target: browser
+            image: cfwarp-eval-browser
+            smoke: browser
+          - target: full
+            image: cfwarp-service-eval
+            smoke: python
     permissions:
       contents: read
       packages: write
@@ -40,7 +56,7 @@ jobs:
       - uses: docker/metadata-action@v6
         id: meta
         with:
-          images: ghcr.io/${{ github.repository_owner }}/cfwarp-service-eval
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -52,6 +68,7 @@ jobs:
         with:
           context: .
           file: service-eval/Dockerfile
+          target: ${{ matrix.target }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -60,13 +77,23 @@ jobs:
             VERSION=${{ steps.pkg.outputs.version }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.pkg.outputs.date }}
-          cache-from: type=gha,scope=service-eval-amd64
-          cache-to: type=gha,mode=max,scope=service-eval-amd64
+          cache-from: type=gha,scope=service-eval-${{ matrix.target }}-amd64
+          cache-to: type=gha,mode=max,scope=service-eval-${{ matrix.target }}-amd64
 
-      - name: Smoke the browser runtime from the published image
+      - name: Smoke the published Python runtime
+        if: matrix.smoke == 'python'
         shell: bash
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/cfwarp-service-eval@${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker run --rm --entrypoint python "$IMAGE" -c \
+            'import cfwarp_service_eval.api, cfwarp_service_eval.worker, cfwarp_service_eval.reporter'
+
+      - name: Smoke the browser runtime from the published image
+        if: matrix.smoke == 'browser'
+        shell: bash
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
           docker run --rm \
@@ -92,6 +119,6 @@ jobs:
       # even though it is skipped in the private runtime project.
       - uses: actions/attest-build-provenance@v4
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/cfwarp-service-eval
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true

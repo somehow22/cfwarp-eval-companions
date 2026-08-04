@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "observers": [
+    {
+      "node_id": "proxy-host-1",
+      "deployment_origin": "sibling-project",
+      "url": "http://100.64.10.20:8080",
+      "token_file": "/run/secrets/proxy-host-1-observer-api-token"
+    }
+  ],
+  "linear_project_id": "example-project-id",
+  "linear_team_id": "example-team-id",
+  "linear_token_file": "/run/secrets/linear-reporter-token",
+  "state_db": "/var/lib/cfwarp-observation-reporter/reporter.sqlite3",
+  "output": "/var/lib/cfwarp-observation-reporter/egress-verdict-report-v1.json",
+  "migration_complete": false,
+  "alerts_file": "/var/lib/cfwarp-observation-reporter/unresolved-alerts.json",
+  "remediation_file": "/var/lib/cfwarp-observation-reporter/remediation-activity.json"
+}

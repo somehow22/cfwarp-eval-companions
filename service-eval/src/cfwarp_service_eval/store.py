@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
+
+from .provenance import observation_v2
+from .contracts import scenario_definitions
 
 
 def utcnow() -> str:
@@ -32,6 +36,8 @@ HEARTBEAT_WINDOW_HOURS = 1
 # Below this many samples the ratio is noise. One failed beat must not
 # quarantine a lane.
 MIN_HEARTBEAT_SAMPLES = 5
+MAX_WORKER_ATTEMPTS = 2
+WORKER_CLASSES = {"light", "perf", "browser"}
 
 # Performance bands, in MiB/s. Banding is not gating: a substrate lane is never
 # failed on throughput, because its speed is the provider's property. But a
@@ -98,7 +104,28 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS idx_heartbeat_lane
               ON heartbeats(lane_id, observed_at DESC);
+            CREATE TABLE IF NOT EXISTS workers (
+              worker_id TEXT PRIMARY KEY, worker_class TEXT NOT NULL,
+              node_id TEXT NOT NULL, evaluator_build TEXT NOT NULL,
+              first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+              metadata TEXT NOT NULL
+            );
             """)
+            self._ensure_column(
+                "tasks", "execution_class", "TEXT NOT NULL DEFAULT 'light'"
+            )
+            self._ensure_column("tasks", "lease_token", "TEXT")
+            self._ensure_column("tasks", "lease_owner", "TEXT")
+            self._ensure_column("tasks", "lease_expires_at", "TEXT")
+            self._ensure_column("tasks", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("tasks", "completion_key", "TEXT")
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        columns = {
+            row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")
+        }
+        if column not in columns:
+            self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     def recover(
         self,
@@ -108,7 +135,10 @@ class Store:
     ) -> None:
         with self._lock, self.db:
             running = self.db.execute(
-                "SELECT group_id,lane_id,scenario_id FROM tasks WHERE status='running'"
+                """
+                SELECT group_id,lane_id,scenario_id,id FROM tasks
+                WHERE status='running' AND lease_token IS NULL
+                """
             ).fetchall()
             now = datetime.now(timezone.utc)
             for row in running:
@@ -121,12 +151,23 @@ class Store:
                 self._insert_observation(
                     row["group_id"], row["lane_id"], row["scenario_id"], observation
                 )
+            for row in running:
+                self.db.execute(
+                    """
+                    UPDATE tasks SET status='unknown', finished_at=?,
+                      error='observer restarted during embedded probe'
+                    WHERE id=?
+                    """,
+                    (now.isoformat(), row["id"]),
+                )
             self.db.execute(
-                "UPDATE tasks SET status='unknown', finished_at=?, error='service restarted during probe' WHERE status='running'",
-                (now.isoformat(),),
-            )
-            self.db.execute(
-                "UPDATE run_groups SET status='queued', started_at=NULL WHERE status='running'"
+                """
+                UPDATE run_groups SET status='queued', started_at=NULL
+                WHERE status='running' AND NOT EXISTS (
+                  SELECT 1 FROM tasks WHERE tasks.group_id=run_groups.id
+                    AND tasks.status='running' AND tasks.lease_token IS NOT NULL
+                )
+                """
             )
             self._backfill_observation_provenance(lanes, scenario_ids, runtime)
             self._supersede_unconfigured_pending_tasks(lanes, now.isoformat())
@@ -196,6 +237,9 @@ class Store:
                     changed = True
             if payload.get("scenario_id") != observation_scenario_id:
                 payload["scenario_id"] = observation_scenario_id
+                changed = True
+            if payload.get("schema_version") != 2:
+                payload = observation_v2(payload, lane, row["scenario_id"])
                 changed = True
             if changed:
                 clean = sanitize_observation(payload)
@@ -290,8 +334,19 @@ class Store:
             for lane_id in lane_ids:
                 for scenario_id in scenario_ids:
                     self.db.execute(
-                        "INSERT INTO tasks(group_id,lane_id,scenario_id,ordinal,status) VALUES(?,?,?,?,?)",
-                        (group_id, lane_id, scenario_id, ordinal, "queued"),
+                        """
+                        INSERT INTO tasks(
+                          group_id,lane_id,scenario_id,ordinal,status,execution_class
+                        ) VALUES(?,?,?,?,?,?)
+                        """,
+                        (
+                            group_id,
+                            lane_id,
+                            scenario_id,
+                            ordinal,
+                            "queued",
+                            execution_class(scenario_id),
+                        ),
                     )
                     ordinal += 1
         return self.group(group_id)
@@ -402,6 +457,272 @@ class Store:
                 "UPDATE run_groups SET status='complete',finished_at=? WHERE id=?",
                 (utcnow(), group_id),
             )
+
+    def register_worker(
+        self,
+        worker_id: str,
+        worker_class: str,
+        node_id: str,
+        build: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if worker_class not in WORKER_CLASSES:
+            raise ValueError("unsupported worker class")
+        now = utcnow()
+        with self._lock, self.db:
+            self.db.execute(
+                """
+                INSERT INTO workers(
+                  worker_id,worker_class,node_id,evaluator_build,
+                  first_seen_at,last_seen_at,metadata
+                ) VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(worker_id) DO UPDATE SET
+                  worker_class=excluded.worker_class,
+                  node_id=excluded.node_id,
+                  evaluator_build=excluded.evaluator_build,
+                  last_seen_at=excluded.last_seen_at,
+                  metadata=excluded.metadata
+                """,
+                (
+                    worker_id,
+                    worker_class,
+                    node_id,
+                    build,
+                    now,
+                    now,
+                    json.dumps(metadata or {}, separators=(",", ":")),
+                ),
+            )
+        return {
+            "worker_id": worker_id,
+            "worker_class": worker_class,
+            "node_id": node_id,
+            "evaluator_build": build,
+            "last_seen_at": now,
+        }
+
+    def worker_statuses(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT * FROM workers ORDER BY worker_class,worker_id"
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = json.loads(item["metadata"])
+            result.append(item)
+        return result
+
+    def expire_leases(
+        self,
+        lanes: Mapping[str, Mapping[str, Any]],
+        scenario_ids: Mapping[str, str],
+    ) -> int:
+        now = datetime.now(timezone.utc)
+        expired = 0
+        with self._lock, self.db:
+            rows = self.db.execute(
+                """
+                SELECT * FROM tasks
+                WHERE status='running' AND lease_token IS NOT NULL
+                  AND lease_expires_at<=?
+                """,
+                (now.isoformat(),),
+            ).fetchall()
+            for row in rows:
+                expired += 1
+                if row["attempt_count"] < MAX_WORKER_ATTEMPTS:
+                    self.db.execute(
+                        """
+                        UPDATE tasks SET status='queued',lease_token=NULL,
+                          lease_owner=NULL,lease_expires_at=NULL,
+                          error='worker lease expired; bounded retry queued'
+                        WHERE id=?
+                        """,
+                        (row["id"],),
+                    )
+                    continue
+                observation = unknown_observation(
+                    lanes[row["lane_id"]],
+                    scenario_ids[row["scenario_id"]],
+                    now,
+                )
+                self._insert_observation(
+                    row["group_id"], row["lane_id"], row["scenario_id"], observation
+                )
+                self.db.execute(
+                    """
+                    UPDATE tasks SET status='unknown',finished_at=?,
+                      error='worker lease expired after bounded retry'
+                    WHERE id=?
+                    """,
+                    (now.isoformat(), row["id"]),
+                )
+                self._reconcile_group(row["group_id"], now.isoformat())
+        return expired
+
+    def claim_task(
+        self, worker_id: str, worker_class: str, lease_seconds: int
+    ) -> dict[str, Any] | None:
+        if worker_class not in WORKER_CLASSES:
+            raise ValueError("unsupported worker class")
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(seconds=lease_seconds)
+        with self._lock, self.db:
+            row = self.db.execute(
+                """
+                SELECT t.* FROM tasks t
+                JOIN run_groups g ON g.id=t.group_id
+                WHERE t.status='queued' AND t.execution_class=?
+                  AND t.attempt_count<?
+                ORDER BY g.created_at,t.ordinal,t.id LIMIT 1
+                """,
+                (worker_class, MAX_WORKER_ATTEMPTS),
+            ).fetchone()
+            if row is None:
+                return None
+            lease_token = str(uuid.uuid4())
+            updated = self.db.execute(
+                """
+                UPDATE tasks SET status='running',started_at=COALESCE(started_at,?),
+                  lease_token=?,lease_owner=?,lease_expires_at=?,attempt_count=attempt_count+1
+                WHERE id=? AND status='queued'
+                """,
+                (
+                    now.isoformat(),
+                    lease_token,
+                    worker_id,
+                    expires.isoformat(),
+                    row["id"],
+                ),
+            ).rowcount
+            if updated != 1:
+                return None
+            self.db.execute(
+                """
+                UPDATE run_groups SET status='running',started_at=COALESCE(started_at,?)
+                WHERE id=?
+                """,
+                (now.isoformat(), row["group_id"]),
+            )
+            claimed = dict(row)
+            claimed.update(
+                {
+                    "status": "running",
+                    "lease_token": lease_token,
+                    "lease_owner": worker_id,
+                    "lease_expires_at": expires.isoformat(),
+                    "attempt_count": row["attempt_count"] + 1,
+                }
+            )
+            return claimed
+
+    def complete_leased_task(
+        self,
+        task_id: int,
+        lease_token: str,
+        observation: Mapping[str, Any],
+    ) -> str:
+        clean = sanitize_observation(dict(observation))
+        completion_key = hashlib.sha256(
+            json.dumps(clean, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        with self._lock, self.db:
+            row = self.db.execute(
+                "SELECT * FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["status"] in {"complete", "unknown"}:
+                if row["completion_key"] == completion_key:
+                    return "duplicate"
+                raise LeaseConflict("task already completed with different evidence")
+            if row["status"] != "running" or row["lease_token"] != lease_token:
+                raise LeaseConflict("lease is not active")
+            if parse_time(row["lease_expires_at"]) <= datetime.now(timezone.utc):
+                raise LeaseConflict("lease expired")
+            self._insert_observation(
+                row["group_id"], row["lane_id"], row["scenario_id"], clean
+            )
+            finished = utcnow()
+            self.db.execute(
+                """
+                UPDATE tasks SET status='complete',finished_at=?,completion_key=?
+                WHERE id=?
+                """,
+                (finished, completion_key, task_id),
+            )
+            self._reconcile_group(row["group_id"], finished)
+        return "accepted"
+
+    def fail_leased_task(
+        self,
+        task_id: int,
+        lease_token: str,
+        lane: Mapping[str, Any],
+        observation_scenario_id: str,
+        error: str,
+    ) -> str:
+        now = datetime.now(timezone.utc)
+        with self._lock, self.db:
+            row = self.db.execute(
+                "SELECT * FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["status"] == "unknown" and row["completion_key"] == lease_token:
+                return "duplicate"
+            if row["status"] != "running" or row["lease_token"] != lease_token:
+                raise LeaseConflict("lease is not active")
+            observation = unknown_observation(lane, observation_scenario_id, now)
+            self._insert_observation(
+                row["group_id"], row["lane_id"], row["scenario_id"], observation
+            )
+            self.db.execute(
+                """
+                UPDATE tasks SET status='unknown',finished_at=?,error=?,completion_key=?
+                WHERE id=?
+                """,
+                (now.isoformat(), error[:300], lease_token, task_id),
+            )
+            self._reconcile_group(row["group_id"], now.isoformat())
+        return "accepted"
+
+    def _reconcile_group(self, group_id: str, now: str) -> None:
+        pending = self.db.execute(
+            """
+            SELECT count(*) FROM tasks WHERE group_id=?
+              AND status IN ('queued','running')
+            """,
+            (group_id,),
+        ).fetchone()[0]
+        if pending == 0:
+            self.db.execute(
+                "UPDATE run_groups SET status='complete',finished_at=? WHERE id=?",
+                (now, group_id),
+            )
+
+    def queue_stats(self) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            counts = self.db.execute(
+                "SELECT status,count(*) AS count FROM tasks GROUP BY status"
+            ).fetchall()
+            oldest = self.db.execute(
+                """
+                SELECT min(g.created_at) AS created_at FROM tasks t
+                JOIN run_groups g ON g.id=t.group_id WHERE t.status='queued'
+                """
+            ).fetchone()["created_at"]
+        return {
+            "by_status": {row["status"]: row["count"] for row in counts},
+            "depth": sum(
+                row["count"] for row in counts if row["status"] in {"queued", "running"}
+            ),
+            "oldest_age_seconds": (
+                max(0, (now - parse_time(oldest)).total_seconds()) if oldest else 0
+            ),
+        }
 
     def group(self, group_id: str) -> dict[str, Any]:
         with self._lock:
@@ -588,15 +909,30 @@ class Store:
         heartbeat = self.heartbeat_stats(lane_id, HEARTBEAT_WINDOW_HOURS)
         scenarios = self.latest_by_scenario(lane_id)
 
-        fresh, stale, unavailable = [], [], []
+        fresh, stale, available, unavailable, unknown, ineligible = (
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
         for scenario_id, record in scenarios.items():
             if parse_time(record["fresh_until"]) <= now:
                 stale.append(scenario_id)
                 continue
             fresh.append(scenario_id)
             result = record["payload"].get("result") or {}
-            if result.get("eligible") and result.get("availability") != "available":
+            availability = result.get("availability")
+            eligible = result.get("eligible") is True
+            if not eligible:
+                ineligible.append(scenario_id)
+            if availability == "available" and eligible:
+                available.append(scenario_id)
+            elif availability == "unavailable" and eligible:
                 unavailable.append(scenario_id)
+            else:
+                unknown.append(scenario_id)
 
         perf = scenarios.get("perf", {}).get("payload", {}).get("perf") or {}
         meets_floor = perf.get("meets_floor")
@@ -615,12 +951,14 @@ class Store:
             tier, reason = "unknown", "every scenario observation is past fresh_until"
         elif ratio is not None and ratio < DEGRADED_HEARTBEAT_RATIO:
             tier, reason = "degraded", f"heartbeat ok ratio {ratio:.2f}"
+        elif unknown and len(unknown) == len(fresh):
+            tier, reason = "unknown", "every fresh scenario is unknown or ineligible"
         elif unavailable and len(unavailable) == len(fresh):
             tier, reason = "degraded", "every fresh scenario is unavailable"
-        elif unavailable:
+        elif unavailable or unknown:
             tier, reason = (
                 "usable",
-                f"{len(unavailable)} of {len(fresh)} fresh scenarios unavailable",
+                f"{len(unavailable)} unavailable and {len(unknown)} unknown of {len(fresh)} fresh scenarios",
             )
         elif meets_floor is False:
             tier, reason = "usable", "throughput below floor"
@@ -637,7 +975,10 @@ class Store:
             "heartbeat": heartbeat,
             "fresh_scenarios": sorted(fresh),
             "stale_scenarios": sorted(stale),
+            "available_scenarios": sorted(available),
             "unavailable_scenarios": sorted(unavailable),
+            "unknown_scenarios": sorted(unknown),
+            "ineligible_scenarios": sorted(ineligible),
             "meets_throughput_floor": meets_floor,
             "throughput_mibps": throughput,
             "performance_band": performance_band(throughput),
@@ -695,6 +1036,17 @@ class QueueFull(Exception):
     pass
 
 
+class LeaseConflict(Exception):
+    pass
+
+
+def execution_class(scenario_id: str) -> str:
+    definition = scenario_definitions()[scenario_id]
+    if scenario_id == "perf":
+        return "perf"
+    return "browser" if definition["execution_class"] == "browser" else "light"
+
+
 def parse_time(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
@@ -718,7 +1070,7 @@ def unknown_observation(
     now: datetime,
     runtime: str = "podman",
 ) -> dict[str, Any]:
-    return {
+    observation = {
         "schema_version": 1,
         "observation_id": str(uuid.uuid4()),
         "observed_at": now.isoformat(),
@@ -749,6 +1101,7 @@ def unknown_observation(
         "latency_ms": 0,
         "artifacts": [],
     }
+    return observation_v2(observation, lane, scenario_id)
 
 
 def tree_size(path: Path) -> int:
