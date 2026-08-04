@@ -141,12 +141,23 @@ class BrushRequest:
     attempts: int = 3
     strategy: str = "auto"
     lease_seconds: int = 900
+    force_change: bool = False
 
 
 class BrushRunner:
     def __init__(self, control: Control, evaluator: Evaluator):
         self.control = control
         self.evaluator = evaluator
+
+    async def rollback(self, trial_id: str) -> dict[str, Any]:
+        try:
+            return await self.control.rollback(trial_id)
+        except Exception:
+            # A restored listener can be briefly unavailable while the cfwarp
+            # runtime finishes settling. The core rollback is transactional and
+            # safe to repeat for the same active trial, so retry once before
+            # classifying the operation as a route-runtime failure.
+            return await self.control.rollback(trial_id)
 
     async def run(self, request: BrushRequest) -> dict[str, Any]:
         definition = ensure_brushable(request.scenario_id)
@@ -167,6 +178,7 @@ class BrushRunner:
             "strategy": request.strategy,
             "attempts_requested": request.attempts,
             "attempts": [],
+            "force_change": request.force_change,
             "started_at": started.isoformat(),
             "outcome": "failed",
         }
@@ -179,7 +191,7 @@ class BrushRunner:
             f"{run_id}/perf-before", request.lane, "perf"
         )
         baseline_state = observation_state(baseline, definition["scenario_id"])
-        if baseline_state == "available":
+        if baseline_state == "available" and not request.force_change:
             result["outcome"] = "already_satisfied"
             return finish(result, started)
         if baseline_state == "unknown":
@@ -205,7 +217,7 @@ class BrushRunner:
                     "candidate_public_ip_hash"
                 )
                 if not attempt["public_ip_changed"]:
-                    await self.control.rollback(str(trial["trial_id"]))
+                    await self.rollback(str(trial["trial_id"]))
                     attempt["rollback"] = "succeeded"
                     attempt["failure_layer"] = "warp-core"
                     attempt["reason"] = "listener-facing public IP did not change"
@@ -239,7 +251,7 @@ class BrushRunner:
                     result["attempts_used"] = number
                     return finish(result, started)
 
-                await self.control.rollback(str(trial["trial_id"]))
+                await self.rollback(str(trial["trial_id"]))
                 attempt["rollback"] = "succeeded"
                 if state == "unknown":
                     attempt["outcome"] = "unknown"
@@ -254,7 +266,7 @@ class BrushRunner:
             except Exception as error:
                 if trial is not None and trial.get("trial_id"):
                     try:
-                        await self.control.rollback(str(trial["trial_id"]))
+                        await self.rollback(str(trial["trial_id"]))
                         attempt["rollback"] = "succeeded"
                     except Exception:
                         attempt["rollback"] = "failed"
@@ -342,6 +354,11 @@ def parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--lease-seconds", type=int, default=900)
     run.add_argument(
+        "--force-change",
+        action="store_true",
+        help="require a changed WARP IP even when the baseline service is available",
+    )
+    run.add_argument(
         "--browser-execution",
         choices=["disabled", "local", "agentcore"],
         default="disabled",
@@ -384,6 +401,7 @@ def main() -> int:
                 attempts=args.attempts,
                 strategy=args.strategy,
                 lease_seconds=args.lease_seconds,
+                force_change=args.force_change,
             )
         )
     )

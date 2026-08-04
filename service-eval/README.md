@@ -170,6 +170,12 @@ candidates are evaluated through the same canonical runner; eligible passes
 commit, eligible failures roll back, and an evaluator failure gets one retry on
 the same candidate before rollback.
 
+Central maintenance that explicitly requests a new WARP address adds
+`--force-change`. This preserves the same baseline, transactional candidate,
+canonical scenario evaluation, and rollback behavior, but it does not
+short-circuit when the baseline is already available. Unknown baseline evidence
+still fails closed.
+
 Every brush run records `performance_before`; every changed-IP candidate also
 records `performance_after`. Both use the canonical `perf` scenario, and
 neither can approve, reject, commit, or roll back a candidate. `perf` cannot be
