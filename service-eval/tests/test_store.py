@@ -16,6 +16,13 @@ def lane():
         "requested_region": "DE",
         "image_identity": "example@sha256:" + "a" * 64,
         "config_digest": "sha256:" + "b" * 64,
+        "config_generation": "generation-1",
+        "deployment_origin": "cfwarp-pro",
+        "substrate": "direct",
+        "requested_region_raw": "DE",
+        "cloudflare_proto": "warp",
+        "ip_proto_stack": "v4",
+        "capability_id": "direct-DE-warp-v4",
     }
 
 
@@ -59,12 +66,21 @@ def test_restart_recovery_records_unknown_observation_and_completes_group(tmp_pa
         "runtime": "podman",
         "image_identity": "example@sha256:" + "a" * 64,
         "config_digest": "sha256:" + "b" * 64,
+        "config_generation": "generation-1",
+        "deployment_origin": "cfwarp-pro",
+        "evaluator_build": "development",
     }
     assert observation["lane"] == {
+        "lane_id": "direct-de",
+        "capability_id": "direct-DE-warp-v4",
         "composition": "direct-warp",
         "transport": "wireguard",
+        "substrate": "direct",
         "substrate_profile": None,
         "requested_region": "DE",
+        "requested_region_raw": "DE",
+        "cloudflare_proto": "warp",
+        "ip_proto_stack": "v4",
     }
 
 
@@ -266,6 +282,57 @@ def test_tier_is_unknown_when_evidence_expired(tmp_path):
     tier = store.lane_tier("direct-de")
     assert tier["tier"] == "unknown"
     assert tier["stale_scenarios"] == ["youtube"]
+
+
+@pytest.mark.parametrize("eligible", [False, True])
+def test_fresh_unknown_never_becomes_preferred(tmp_path, eligible):
+    store = Store(tmp_path / "state.sqlite3")
+    beat(store, "direct-de", True, count=10)
+    record(
+        store,
+        "direct-de",
+        "youtube",
+        "unknown",
+        extra={
+            "result": {
+                "availability": "unknown",
+                "class": "tooling_failure",
+                "eligible": eligible,
+            }
+        },
+    )
+    tier = store.lane_tier("direct-de")
+    assert tier["tier"] == "unknown"
+    assert tier["unknown_scenarios"] == ["youtube"]
+
+
+def test_worker_lease_expires_once_then_fails_closed_unknown(tmp_path):
+    store = Store(tmp_path / "state.sqlite3")
+    group = store.create_group(["direct-de"], ["youtube"])
+    first = store.claim_task("light-1", "light", 60)
+    assert first["attempt_count"] == 1
+    old = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with store.db:
+        store.db.execute(
+            "UPDATE tasks SET lease_expires_at=? WHERE id=?", (old, first["id"])
+        )
+    assert (
+        store.expire_leases(
+            {"direct-de": lane()}, {"youtube": "youtube.anonymous_public_video"}
+        )
+        == 1
+    )
+    second = store.claim_task("light-2", "light", 60)
+    assert second["attempt_count"] == 2
+    with store.db:
+        store.db.execute(
+            "UPDATE tasks SET lease_expires_at=? WHERE id=?", (old, second["id"])
+        )
+    store.expire_leases(
+        {"direct-de": lane()}, {"youtube": "youtube.anonymous_public_video"}
+    )
+    assert store.group(group["id"])["status"] == "complete"
+    assert store.latest()[0]["result"]["availability"] == "unknown"
 
 
 def test_tier_quarantines_a_lane_whose_heartbeat_mostly_fails(tmp_path):

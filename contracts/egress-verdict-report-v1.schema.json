@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/somehow22/cfwarp-eval-companions/contracts/egress-verdict-report-v1.schema.json",
+  "title": "cfwarp egress verdict report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "sources", "platform_slo", "scenarios", "egresses", "remediation"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_id", "deployment_origin", "observer_build", "observation_schema", "evaluator_builds", "config_generations"],
+        "properties": {
+          "node_id": {"type": "string", "minLength": 1},
+          "deployment_origin": {"type": "string", "minLength": 1},
+          "observer_build": {"type": "string", "minLength": 1},
+          "observation_schema": {"enum": [1, 2]},
+          "evaluator_builds": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+          "config_generations": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+        }
+      }
+    },
+    "platform_slo": {"type": "object"},
+    "scenarios": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["available", "unavailable", "unknown"],
+        "properties": {
+          "available": {"type": "integer", "minimum": 0},
+          "unavailable": {"type": "integer", "minimum": 0},
+          "unknown": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "egresses": {"type": "array", "items": {"type": "object"}},
+    "remediation": {"type": "array", "items": {"type": "object"}}
+  }
+}

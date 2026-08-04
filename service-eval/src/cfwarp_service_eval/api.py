@@ -19,8 +19,9 @@ from .capabilities import (
     resolve_scenario_capabilities,
 )
 from .config import SCENARIOS, load_lanes
+from .provenance import evaluator_build
 from .runner import ProbeRunner
-from .store import QueueFull, Store, parse_time
+from .store import LeaseConflict, QueueFull, Store, parse_time, tree_size
 
 __all__ = ["parse_scenarios"]
 
@@ -38,6 +39,37 @@ class RunGroupRequest(BaseModel):
         if len(value) != len(set(value)):
             raise ValueError("IDs must be unique")
         return value
+
+
+class WorkerHeartbeatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    worker_id: str = Field(min_length=1, max_length=128)
+    worker_class: str = Field(pattern="^(light|perf|browser)$")
+    node_id: str = Field(min_length=1, max_length=128)
+    evaluator_build: str = Field(min_length=1, max_length=256)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ClaimRequest(WorkerHeartbeatRequest):
+    lease_seconds: int = Field(default=240, ge=30, le=900)
+
+
+class CompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    lease_token: str = Field(min_length=1, max_length=128)
+    observation: dict[str, Any]
+
+
+class FailureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    lease_token: str = Field(min_length=1, max_length=128)
+    error: str = Field(min_length=1, max_length=300)
+
+
+class HeartbeatResultRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    lane_id: str = Field(min_length=1, max_length=32)
+    result: dict[str, Any]
 
 
 def env_int(name: str, default: int) -> int:
@@ -96,6 +128,12 @@ class Runtime:
             if metrics_token_file
             else self.token
         )
+        worker_token_file = os.environ.get("SERVICE_EVAL_WORKER_TOKEN_FILE")
+        self.worker_token = (
+            read_token(Path(worker_token_file), "worker")
+            if worker_token_file
+            else self.token
+        )
         self.browser_execution = parse_browser_execution(
             os.environ.get("SERVICE_EVAL_BROWSER_EXECUTION")
         )
@@ -123,6 +161,15 @@ class Runtime:
         self.lane_chunk = env_int("SERVICE_EVAL_LANE_CHUNK", 5)
         self.heartbeat_enabled = env_flag("SERVICE_EVAL_HEARTBEAT_ENABLED")
         self.scheduler_enabled = env_flag("SERVICE_EVAL_SCHEDULER_ENABLED")
+        self.embedded_worker_enabled = env_flag(
+            "SERVICE_EVAL_EMBEDDED_WORKER_ENABLED", default=False
+        )
+        self.expected_lane_count = env_int(
+            "SERVICE_EVAL_EXPECTED_LANE_COUNT", len(self.lanes)
+        )
+        self.observer_build = os.environ.get("CFWARP_OBSERVER_BUILD", evaluator_build())
+        self.last_sweep_at: str | None = None
+        self.telemetry_export_at: str | None = None
         self.wakeup = asyncio.Event()
         self.stop = asyncio.Event()
         self.tasks: list[asyncio.Task[None]] = []
@@ -133,7 +180,8 @@ class Runtime:
             {lane_id: lane.public() for lane_id, lane in self.lanes.items()},
             SCENARIOS,
         )
-        self.spawn(self.sweep_worker, "probe-sweep-worker")
+        if self.embedded_worker_enabled:
+            self.spawn(self.sweep_worker, "probe-sweep-worker")
         if self.heartbeat_enabled:
             self.spawn(self.heartbeat_loop, "probe-heartbeat")
         if self.scheduler_enabled:
@@ -196,7 +244,9 @@ class Runtime:
         )
         latest = self.store.latest_by_scenario(lane_id)
         due = []
-        for scenario_id in self.scenarios:
+        for scenario_id in self.lanes[lane_id].scenarios:
+            if scenario_id not in self.scenarios:
+                continue
             record = latest.get(scenario_id)
             if record is None:
                 due.append(scenario_id)
@@ -212,7 +262,12 @@ class Runtime:
             return
         while not self.stop.is_set():
             try:
+                self.store.expire_leases(
+                    {lane_id: lane.public() for lane_id, lane in self.lanes.items()},
+                    SCENARIOS,
+                )
                 self.enqueue_due_sweeps()
+                self.last_sweep_at = datetime.now(timezone.utc).isoformat()
             except Exception:
                 pass
             if not await self.sleep_or_stop(max(60, self.heartbeat_interval)):
@@ -364,6 +419,22 @@ def require_metrics_bearer(
 MetricsProtected = Annotated[None, Depends(require_metrics_bearer)]
 
 
+def require_worker_bearer(
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    if runtime is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "service unavailable")
+    if not bearer_matches(authorization, runtime.worker_token):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "invalid worker bearer token",
+            {"WWW-Authenticate": "Bearer"},
+        )
+
+
+WorkerProtected = Annotated[None, Depends(require_worker_bearer)]
+
+
 @app.get("/healthz", include_in_schema=False)
 def healthz() -> dict[str, str]:
     if runtime is not None and runtime.background_failures:
@@ -374,6 +445,12 @@ def healthz() -> dict[str, str]:
 @app.get("/v1/scenarios")
 def scenarios(_: Protected) -> list[dict[str, Any]]:
     """Only the scenarios this node is configured to run."""
+    assert runtime
+    return [row for row in runtime.scenario_capabilities if row["enabled"]]
+
+
+@app.get("/v2/scenarios")
+def scenarios_v2(_: Protected) -> list[dict[str, Any]]:
     assert runtime
     return [row for row in runtime.scenario_capabilities if row["enabled"]]
 
@@ -391,10 +468,16 @@ def lanes(_: Protected) -> list[dict[str, Any]]:
     return [lane.public() for lane in runtime.lanes.values()]
 
 
+@app.get("/v2/lanes")
+def lanes_v2(_: Protected) -> list[dict[str, Any]]:
+    """Return public deployment identity without worker-only listener addresses."""
+    assert runtime
+    return [lane.public() for lane in runtime.lanes.values()]
+
+
 @app.get("/v1/tiers")
 def tiers(_: Protected) -> list[dict[str, Any]]:
-    """Derived routing tier per lane. This is the consumer-facing surface:
-    callers route on tier, not on raw availability arithmetic."""
+    """Deprecated diagnostic tier; never a consumer admission surface."""
     assert runtime
     return [
         runtime.store.lane_tier(lane_id, requested_region=lane.requested_region)
@@ -411,6 +494,14 @@ def create_group(body: RunGroupRequest, _: Protected) -> dict[str, Any]:
         raise HTTPException(
             422, f"scenario IDs not enabled on this node: {sorted(unknown)}"
         )
+    undeclared = {
+        (lane_id, scenario_id)
+        for lane_id in body.lane_ids
+        for scenario_id in body.scenario_ids
+        if scenario_id not in runtime.lanes[lane_id].scenarios
+    }
+    if undeclared:
+        raise HTTPException(422, f"undeclared lane scenarios: {sorted(undeclared)}")
     try:
         group = runtime.store.create_group(body.lane_ids, body.scenario_ids)
     except QueueFull as error:
@@ -436,6 +527,17 @@ def latest(_: Protected) -> list[dict[str, Any]]:
     return runtime.store.latest()
 
 
+@app.get("/v2/observations/latest")
+def latest_v2(_: Protected) -> list[dict[str, Any]]:
+    """Return the newest Observation v2 cell, including unknown/unavailable."""
+    assert runtime
+    return [
+        observation
+        for observation in runtime.store.latest()
+        if observation.get("schema_version") == 2
+    ]
+
+
 @app.get("/v1/observations")
 def observations(
     _: Protected,
@@ -459,6 +561,294 @@ def observations(
     return runtime.store.observations(lane, scenario, since, until, limit)
 
 
+@app.get("/v2/internal/lanes")
+def internal_lanes(_: WorkerProtected) -> list[dict[str, Any]]:
+    assert runtime
+    return [lane.internal("light") for lane in runtime.lanes.values()]
+
+
+@app.post("/v2/workers/heartbeat")
+def worker_heartbeat(
+    body: WorkerHeartbeatRequest, _: WorkerProtected
+) -> dict[str, Any]:
+    assert runtime
+    return runtime.store.register_worker(
+        body.worker_id,
+        body.worker_class,
+        body.node_id,
+        body.evaluator_build,
+        body.metadata,
+    )
+
+
+@app.post("/v2/jobs/claim")
+def claim_job(body: ClaimRequest, _: WorkerProtected) -> dict[str, Any]:
+    assert runtime
+    runtime.store.register_worker(
+        body.worker_id,
+        body.worker_class,
+        body.node_id,
+        body.evaluator_build,
+        body.metadata,
+    )
+    runtime.store.expire_leases(
+        {lane_id: lane.public() for lane_id, lane in runtime.lanes.items()}, SCENARIOS
+    )
+    task = runtime.store.claim_task(
+        body.worker_id, body.worker_class, body.lease_seconds
+    )
+    if task is None:
+        return {"job": None}
+    lane = runtime.lanes[task["lane_id"]]
+    return {
+        "job": {
+            "task_id": task["id"],
+            "group_id": task["group_id"],
+            "scenario_id": task["scenario_id"],
+            "execution_class": task["execution_class"],
+            "attempt": task["attempt_count"],
+            "lease_token": task["lease_token"],
+            "lease_expires_at": task["lease_expires_at"],
+            "lane": lane.internal(body.worker_class),
+        }
+    }
+
+
+def validate_completed_observation(
+    lane_id: str, scenario_id: str, observation: dict[str, Any]
+) -> None:
+    assert runtime
+    lane = runtime.lanes[lane_id]
+    subject = observation.get("subject") or {}
+    lane_payload = observation.get("lane") or {}
+    result = observation.get("result") or {}
+    if observation.get("schema_version") != 2:
+        raise HTTPException(422, "worker completion must be Observation v2")
+    if observation.get("scenario_id") != SCENARIOS[scenario_id]:
+        raise HTTPException(422, "scenario provenance does not match leased job")
+    expected = {
+        "deployment_origin": lane.deployment_origin,
+        "instance_id": lane.instance_id,
+        "node_id": lane.node_id,
+        "config_generation": lane.config_generation,
+    }
+    if any(subject.get(key) != value for key, value in expected.items()):
+        raise HTTPException(422, "subject provenance does not match active deployment")
+    if lane_payload.get("capability_id") != lane.capability_id:
+        raise HTTPException(422, "capability identity does not match active deployment")
+    availability = result.get("availability")
+    eligible = result.get("eligible")
+    if (availability == "unknown" and eligible is not False) or (
+        availability in {"available", "unavailable"} and eligible is not True
+    ):
+        raise HTTPException(422, "availability and eligibility are inconsistent")
+
+
+@app.post("/v2/jobs/{task_id}/complete")
+def complete_job(
+    task_id: int, body: CompletionRequest, _: WorkerProtected
+) -> dict[str, str]:
+    assert runtime
+    row = runtime.store.db.execute(
+        "SELECT lane_id,scenario_id FROM tasks WHERE id=?", (task_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "job not found")
+    validate_completed_observation(row["lane_id"], row["scenario_id"], body.observation)
+    try:
+        disposition = runtime.store.complete_leased_task(
+            task_id, body.lease_token, body.observation
+        )
+    except LeaseConflict as error:
+        raise HTTPException(409, str(error)) from error
+    return {"disposition": disposition}
+
+
+@app.post("/v2/jobs/{task_id}/fail")
+def fail_job(task_id: int, body: FailureRequest, _: WorkerProtected) -> dict[str, str]:
+    assert runtime
+    row = runtime.store.db.execute(
+        "SELECT lane_id,scenario_id FROM tasks WHERE id=?", (task_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "job not found")
+    try:
+        disposition = runtime.store.fail_leased_task(
+            task_id,
+            body.lease_token,
+            runtime.lanes[row["lane_id"]].public(),
+            SCENARIOS[row["scenario_id"]],
+            body.error,
+        )
+    except LeaseConflict as error:
+        raise HTTPException(409, str(error)) from error
+    return {"disposition": disposition}
+
+
+@app.post("/v2/heartbeats", status_code=status.HTTP_202_ACCEPTED)
+def submit_heartbeat(
+    body: HeartbeatResultRequest, _: WorkerProtected
+) -> dict[str, str]:
+    assert runtime
+    if body.lane_id not in runtime.lanes:
+        raise HTTPException(422, "unknown lane ID")
+    runtime.store.record_heartbeat(body.lane_id, body.result)
+    return {"disposition": "accepted"}
+
+
+def cell_summary(lanes: dict[str, Any], now: datetime) -> dict[str, Any]:
+    assert runtime
+    availability = {"available": 0, "unavailable": 0, "unknown": 0}
+    evaluated = fresh = 0
+    expected = 0
+    for lane_id, lane in lanes.items():
+        latest_by_scenario = runtime.store.latest_by_scenario(lane_id)
+        for scenario_id in lane.scenarios:
+            if scenario_id not in runtime.scenarios:
+                continue
+            expected += 1
+            record = latest_by_scenario.get(scenario_id)
+            if record is None:
+                availability["unknown"] += 1
+                continue
+            evaluated += 1
+            if parse_time(record["fresh_until"]) <= now:
+                availability["unknown"] += 1
+                continue
+            fresh += 1
+            result = record["payload"].get("result") or {}
+            classification = result.get("availability")
+            if classification not in availability or not result.get("eligible"):
+                classification = "unknown"
+            availability[classification] += 1
+    return {
+        "expected_cells": expected,
+        "evaluated_cells": evaluated,
+        "fresh_cells": fresh,
+        "availability": availability,
+    }
+
+
+def platform_slo_snapshot() -> dict[str, Any]:
+    assert runtime
+    now = datetime.now(timezone.utc)
+    cells = cell_summary(runtime.lanes, now)
+    workers = runtime.store.worker_statuses()
+    worker_cutoff = now - timedelta(seconds=max(180, runtime.heartbeat_interval * 3))
+    worker_up = {
+        worker_class: sum(
+            1
+            for worker in workers
+            if worker["worker_class"] == worker_class
+            and parse_time(worker["last_seen_at"]) >= worker_cutoff
+        )
+        for worker_class in ("light", "perf", "browser")
+    }
+    hard_warp_off = sum(
+        1
+        for lane_id in runtime.lanes
+        if (runtime.store.heartbeat_stats(lane_id)["latest"] or {}).get("warp") == "off"
+    )
+    telemetry_export_age = (
+        max(0, (now - parse_time(runtime.telemetry_export_at)).total_seconds())
+        if runtime.telemetry_export_at
+        else None
+    )
+    last_sweep_age = (
+        max(0, (now - parse_time(runtime.last_sweep_at)).total_seconds())
+        if runtime.last_sweep_at
+        else None
+    )
+    return {
+        "schema_version": 1,
+        "generated_at": now.isoformat(),
+        "observer_build": runtime.observer_build,
+        "observer_up": not runtime.background_failures,
+        "workers_up": worker_up,
+        **cells,
+        "completeness": (
+            cells["fresh_cells"] / cells["expected_cells"]
+            if cells["expected_cells"]
+            else 0
+        ),
+        "queue": runtime.store.queue_stats(),
+        "last_sweep_at": runtime.last_sweep_at,
+        "last_sweep_age_seconds": last_sweep_age,
+        "store_bytes": runtime.store.path.stat().st_size,
+        "artifact_bytes": tree_size(runtime.runner.artifact_root),
+        "background_failures": sorted(runtime.background_failures),
+        "telemetry_export_at": runtime.telemetry_export_at,
+        "telemetry_export_age_seconds": telemetry_export_age,
+        "active_lane_count": len(runtime.lanes),
+        "hard_warp_off": hard_warp_off,
+        "expected_lane_count": runtime.expected_lane_count,
+        "deployment_inventory_mismatch": runtime.expected_lane_count
+        - len(runtime.lanes),
+    }
+
+
+@app.get("/v2/platform-slo")
+def platform_slo(_: Protected) -> dict[str, Any]:
+    return platform_slo_snapshot()
+
+
+@app.post("/v2/telemetry-export-heartbeat", status_code=status.HTTP_202_ACCEPTED)
+def telemetry_export_heartbeat(_: MetricsProtected) -> dict[str, str]:
+    assert runtime
+    runtime.telemetry_export_at = datetime.now(timezone.utc).isoformat()
+    return {"disposition": "accepted"}
+
+
+@app.get("/v2/egresses")
+def egresses(
+    _: Protected,
+    scenario: str,
+    capability_id: str | None = None,
+    deployment_origin: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return only exact, fresh, eligible evidence for the active generation."""
+    assert runtime
+    if scenario not in runtime.scenarios:
+        raise HTTPException(422, "scenario is not enabled on this observer")
+    now = datetime.now(timezone.utc)
+    discovered = []
+    for lane_id, lane in runtime.lanes.items():
+        if capability_id is not None and lane.capability_id != capability_id:
+            continue
+        if (
+            deployment_origin is not None
+            and lane.deployment_origin != deployment_origin
+        ):
+            continue
+        record = runtime.store.latest_by_scenario(lane_id).get(scenario)
+        if record is None or parse_time(record["fresh_until"]) <= now:
+            continue
+        observation = record["payload"]
+        result = observation.get("result") or {}
+        subject = observation.get("subject") or {}
+        lane_payload = observation.get("lane") or {}
+        if not (
+            observation.get("schema_version") == 2
+            and result.get("availability") == "available"
+            and result.get("eligible") is True
+            and subject.get("config_generation") == lane.config_generation
+            and subject.get("deployment_origin") == lane.deployment_origin
+            and lane_payload.get("capability_id") == lane.capability_id
+        ):
+            continue
+        discovered.append(
+            {
+                **lane.public(),
+                "scenario": scenario,
+                "observation_id": observation["observation_id"],
+                "observed_at": observation["observed_at"],
+                "fresh_until": observation["fresh_until"],
+                "egress": observation.get("egress") or {},
+            }
+        )
+    return discovered
+
+
 TIERS = ("preferred", "usable", "degraded", "quarantined", "unknown")
 
 
@@ -477,6 +867,8 @@ def metrics(_: MetricsProtected) -> str:
     assert runtime
     now = datetime.now(timezone.utc)
     lines = [
+        "# HELP cfwarp_platform_api_up Observer API is serving requests.",
+        "# TYPE cfwarp_platform_api_up gauge",
         "# HELP cfwarp_probe_lane_tier Lane routing tier, 1 for the active tier.",
         "# TYPE cfwarp_probe_lane_tier gauge",
         "# HELP cfwarp_probe_heartbeat_ok_ratio Heartbeat success ratio over the tier window.",
@@ -497,11 +889,15 @@ def metrics(_: MetricsProtected) -> str:
         "# TYPE cfwarp_probe_lane_region_match gauge",
         "# HELP cfwarp_probe_lane_region_match_ratio Fraction of recent heartbeats in the requested region.",
         "# TYPE cfwarp_probe_lane_region_match_ratio gauge",
+        "# HELP cfwarp_probe_scenario_result One-hot scenario availability classification.",
+        "# TYPE cfwarp_probe_scenario_result gauge",
     ]
     for lane_id, lane in runtime.lanes.items():
         tier = runtime.store.lane_tier(lane_id, requested_region=lane.requested_region)
         common = (
             f'lane="{escape_label(lane_id)}",'
+            f'node_id="{escape_label(lane.node_id)}",'
+            f'deployment_origin="{escape_label(lane.deployment_origin)}",'
             f'composition="{escape_label(lane.composition)}",'
             f'transport="{escape_label(lane.transport)}",'
             f'requested_region="{escape_label(lane.requested_region or "")}"'
@@ -553,14 +949,111 @@ def metrics(_: MetricsProtected) -> str:
             lines.append(
                 f"cfwarp_probe_lane_region_match_ratio{{{common}}} {region['match_ratio']}"
             )
-        for scenario_id, record in runtime.store.latest_by_scenario(lane_id).items():
-            result = record["payload"].get("result") or {}
+        latest_by_scenario = runtime.store.latest_by_scenario(lane_id)
+        for scenario_id in lane.scenarios:
+            if scenario_id not in runtime.scenarios:
+                continue
+            record = latest_by_scenario.get(scenario_id)
+            result = (record["payload"].get("result") or {}) if record else {}
+            fresh = bool(record and parse_time(record["fresh_until"]) > now)
+            classification = result.get("availability") if result else None
+            if (
+                not fresh
+                or classification not in {"available", "unavailable"}
+                or result.get("eligible") is not True
+            ):
+                classification = "unknown"
             label = f'{common},scenario="{escape_label(scenario_id)}"'
-            available = 1 if result.get("availability") == "available" else 0
+            available = 1 if classification == "available" else 0
             lines.append(f"cfwarp_probe_scenario_available{{{label}}} {available}")
-            remaining = (parse_time(record["fresh_until"]) - now).total_seconds()
+            for name in ("available", "unavailable", "unknown"):
+                value = 1 if classification == name else 0
+                lines.append(
+                    f'cfwarp_probe_scenario_result{{{label},availability="{name}"}} {value}'
+                )
+            if record:
+                remaining = (parse_time(record["fresh_until"]) - now).total_seconds()
+                lines.append(
+                    f"cfwarp_probe_scenario_fresh_seconds{{{label}}} {remaining:.0f}"
+                )
+    snapshot = platform_slo_snapshot()
+    origins = {
+        (lane.node_id, lane.deployment_origin) for lane in runtime.lanes.values()
+    }
+    for node_id, origin in sorted(origins):
+        partition_lanes = {
+            lane_id: lane
+            for lane_id, lane in runtime.lanes.items()
+            if lane.node_id == node_id and lane.deployment_origin == origin
+        }
+        partition = cell_summary(partition_lanes, now)
+        partition_warp_off = sum(
+            1
+            for lane_id in partition_lanes
+            if (runtime.store.heartbeat_stats(lane_id)["latest"] or {}).get("warp")
+            == "off"
+        )
+        platform = (
+            f'node_id="{escape_label(node_id)}",'
+            f'deployment_origin="{escape_label(origin)}"'
+        )
+        lines.append(f"cfwarp_platform_api_up{{{platform}}} 1")
+        for name in (
+            "expected_cells",
+            "evaluated_cells",
+            "fresh_cells",
+        ):
+            lines.append(f"cfwarp_platform_{name}{{{platform}}} {partition[name]}")
+        lines.append(
+            f"cfwarp_platform_active_lane_count{{{platform}}} {len(partition_lanes)}"
+        )
+        lines.append(
+            f"cfwarp_platform_completeness{{{platform}}} "
+            f"{partition['fresh_cells'] / partition['expected_cells'] if partition['expected_cells'] else 0}"
+        )
+        lines.append(
+            f"cfwarp_platform_queue_depth{{{platform}}} {snapshot['queue']['depth']}"
+        )
+        lines.append(
+            f"cfwarp_platform_queue_oldest_age_seconds{{{platform}}} "
+            f"{snapshot['queue']['oldest_age_seconds']}"
+        )
+        lines.append(
+            f"cfwarp_platform_store_bytes{{{platform}}} {snapshot['store_bytes']}"
+        )
+        lines.append(
+            f"cfwarp_platform_artifact_bytes{{{platform}}} {snapshot['artifact_bytes']}"
+        )
+        lines.append(
+            f"cfwarp_platform_background_failures{{{platform}}} "
+            f"{len(snapshot['background_failures'])}"
+        )
+        lines.append(
+            f"cfwarp_platform_deployment_inventory_mismatch{{{platform}}} "
+            f"{snapshot['deployment_inventory_mismatch']}"
+        )
+        lines.append(
+            f"cfwarp_platform_hard_warp_off{{{platform}}} {partition_warp_off}"
+        )
+        if snapshot["last_sweep_age_seconds"] is not None:
             lines.append(
-                f"cfwarp_probe_scenario_fresh_seconds{{{label}}} {remaining:.0f}"
+                f"cfwarp_platform_last_sweep_age_seconds{{{platform}}} "
+                f"{snapshot['last_sweep_age_seconds']}"
+            )
+        if snapshot["telemetry_export_age_seconds"] is not None:
+            lines.append(
+                f"cfwarp_platform_telemetry_export_age_seconds{{{platform}}} "
+                f"{snapshot['telemetry_export_age_seconds']}"
+            )
+        for classification, count in partition["availability"].items():
+            lines.append(
+                f'cfwarp_platform_scenario_cells{{{platform},availability="{classification}"}} '
+                f"{count}"
+            )
+        for worker_class, count in snapshot["workers_up"].items():
+            lines.append(
+                f'cfwarp_platform_worker_up{{{platform},worker_class="{worker_class}"}} '
+                f"{1 if count else 0}"
             )
     return "\n".join(lines) + "\n"
 

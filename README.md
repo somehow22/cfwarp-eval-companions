@@ -24,7 +24,10 @@ in the private runtime project.
 
 | Container | Purpose |
 | --- | --- |
-| `service-eval` | Bounded service, throughput, and challenge-reference probes behind one REST API |
+| `cfwarp-observer` | Per-node API, scheduler, leased queue, retention, and sole SQLite writer |
+| `cfwarp-eval-light` | Node-local trace, heartbeat, and lightweight service worker |
+| `cfwarp-eval-perf` | Separately limited node-local performance worker |
+| `cfwarp-eval-browser` | Central heavyweight worker using declared Tailnet listeners only |
 
 More companions may land here. Each one owns its own directory and Dockerfile.
 
@@ -68,22 +71,30 @@ per-scenario freshness:
 
 | Tier | Meaning |
 | --- | --- |
-| `preferred` | Route here first |
+| `preferred` | Every fresh observation is eligible and available |
 | `usable` | Works; below throughput floor or some scenarios failing |
 | `degraded` | Repeated eligible failures across the window |
 | `quarantined` | Sustained failure; expensive sweeps suspended |
-| `unknown` | Evidence expired |
+| `unknown` | Evidence expired, missing, ineligible, or unknown |
 
 Tier drives probe cadence, so lane count can grow without sweep time growing
 with it.
 
 ## Operating model
 
-The API runs one persistent queue with independent loops:
+The observer runs the persistent queue and scheduler. It never executes a
+scenario or heartbeat when `SERVICE_EVAL_EMBEDDED_WORKER_ENABLED=0` (the
+deployment default). Workers claim short leases through the authenticated
+`/v2/jobs` API and return Observation v2; they never open or share SQLite.
+Lease expiry receives one retry and then writes a fresh `unknown`, so worker
+loss cannot revive an older pass.
 
-- a **heartbeat** loop sampling lane liveness cheaply, so a lane going dark is
+The loops are deliberately split:
+
+- a **light worker** sampling lane liveness cheaply, so a lane going dark is
   visible immediately rather than after a long browser sweep completes;
-- a **sweep** worker running the expensive scenarios;
+- independent **performance** and **browser** workers, so browser/tooling
+  failure cannot stop heartbeat, API, or throughput evaluation;
 - a **scheduler** enqueuing due work, so freshness is a property of the system
   rather than an operator chore.
 
@@ -91,6 +102,13 @@ The scheduler permits at most one pending task for a lane/scenario cell. A
 worker or restart failure still emits `unknown`, but that row retains the same
 instance, image, config, composition, transport, substrate, and canonical
 scenario provenance as a successful observation.
+
+`/v2/egresses` returns only an exact requested scenario with fresh, eligible,
+available evidence whose deployment origin, capability identity, and config
+generation match the active allowlist. It has no stale-pass or aggregate-tier
+fallback. `/v2/platform-slo` exposes the current observer/worker, queue,
+completeness, storage, and inventory state. The `/v1` read surfaces remain
+available during migration.
 
 Callers cannot register proxies or supply target URLs. Lanes are a fixed
 server-side allowlist supplied by the operator, and configured proxy URLs never
@@ -103,6 +121,7 @@ appear in API responses.
 | `SERVICE_EVAL_LANES_FILE` | Read-only lane allowlist |
 | `SERVICE_EVAL_TOKEN_FILE` | API bearer token, minimum 32 characters |
 | `SERVICE_EVAL_METRICS_TOKEN_FILE` | Independent `/metrics` bearer token; falls back to the API token during migration |
+| `SERVICE_EVAL_WORKER_TOKEN_FILE` | Auth token for leased workers; falls back only during migration |
 | `SERVICE_EVAL_STATE_ROOT` | Bounded state and artifact root |
 | `SERVICE_EVAL_BIND_HOST` | Defaults to `127.0.0.1` |
 | `SERVICE_EVAL_SCENARIOS` | Comma-separated scenario allowlist |
@@ -110,6 +129,9 @@ appear in API responses.
 | `SERVICE_EVAL_BROWSER_MIN_MEMORY_MIB` | Local-browser memory floor; defaults to `768` |
 | `SERVICE_EVAL_HEARTBEAT_INTERVAL_SECONDS` | Liveness cadence |
 | `SERVICE_EVAL_SWEEP_INTERVAL_SECONDS` | Scenario cadence, scaled by tier |
+| `SERVICE_EVAL_EMBEDDED_WORKER_ENABLED` | Legacy rollback mode; defaults to disabled |
+| `CFWARP_OBSERVER_BUILD` | Immutable observer image/build identity |
+| `CFWARP_EVALUATOR_BUILD` | Immutable worker image/build identity |
 
 The API binds loopback by default. It typically runs with host networking so it
 can reach lane listeners published on `127.0.0.1`, which would otherwise place

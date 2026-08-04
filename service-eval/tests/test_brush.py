@@ -9,6 +9,7 @@ from cfwarp_service_eval.brush import (
     BrushError,
     BrushRequest,
     BrushRunner,
+    RemediationJournal,
     ScenarioEvaluator,
     ensure_brushable,
 )
@@ -67,6 +68,18 @@ class FakeControl:
         return {"trial_id": trial_id, "status": "rolled_back"}
 
 
+class FlakyRollbackControl(FakeControl):
+    def __init__(self, trials: list[dict]):
+        super().__init__(trials)
+        self.rollback_attempts = 0
+
+    async def rollback(self, trial_id: str) -> dict:
+        self.rollback_attempts += 1
+        if self.rollback_attempts == 1:
+            raise BrushError("restored listener is still settling")
+        return await super().rollback(trial_id)
+
+
 class FakeEvaluator:
     def __init__(self, observations: list[dict]):
         self.observations = list(observations)
@@ -82,10 +95,20 @@ class FailingProbeRunner:
         raise RuntimeError("failed through socks5h://secret.invalid:1080 safely")
 
 
-def run(control: FakeControl, evaluator: FakeEvaluator, attempts: int = 3) -> dict:
+def run(
+    control: FakeControl,
+    evaluator: FakeEvaluator,
+    attempts: int = 3,
+    force_change: bool = False,
+) -> dict:
     return asyncio.run(
         BrushRunner(control, evaluator).run(
-            BrushRequest(lane(), "youtube", attempts=attempts)
+            BrushRequest(
+                lane(),
+                "youtube",
+                attempts=attempts,
+                force_change=force_change,
+            )
         )
     )
 
@@ -118,6 +141,23 @@ def test_baseline_pass_does_not_mutate_egress():
     assert result["performance_before"]["scenario_id"] == "perf.throughput_sample"
 
 
+def test_forced_change_rotates_and_revalidates_a_passing_baseline():
+    control = FakeControl([trial(1, True)])
+    evaluator = FakeEvaluator(
+        [
+            observation("available"),
+            perf_observation(),
+            observation("available"),
+            perf_observation(),
+        ]
+    )
+    result = run(control, evaluator, force_change=True)
+    assert result["force_change"] is True
+    assert result["outcome"] == "succeeded"
+    assert control.prepared == ["reconnect"]
+    assert control.committed == ["trial-1"]
+
+
 def test_baseline_unknown_does_not_mutate_egress():
     control = FakeControl([])
     result = run(
@@ -144,6 +184,17 @@ def test_unchanged_ip_rolls_back_without_expensive_probe():
     assert result["outcome"] == "failed"
     assert control.rolled_back == ["trial-1"]
     assert len(evaluator.calls) == 2
+
+
+def test_transient_rollback_failure_is_retried_before_next_attempt():
+    control = FlakyRollbackControl([trial(1, False), trial(2, False)])
+    evaluator = FakeEvaluator([observation("unavailable"), perf_observation()])
+    result = run(control, evaluator, attempts=2)
+    assert result["outcome"] == "failed"
+    assert result["failure_layer"] == "warp-core"
+    assert control.rollback_attempts == 3
+    assert control.rolled_back == ["trial-1", "trial-2"]
+    assert control.prepared == ["reconnect", "refresh_identity"]
 
 
 def test_service_pass_commits_changed_candidate():
@@ -232,6 +283,60 @@ def test_expired_observation_fails_closed():
     result = run(control, FakeEvaluator([expired, perf_observation()]))
     assert result["outcome"] == "unknown"
     assert control.prepared == []
+
+
+def test_remediation_journal_persists_retry_and_enforces_cooldown(tmp_path):
+    journal = RemediationJournal(tmp_path / "remediation.sqlite3")
+    control = FakeControl([trial(1, True)])
+    evaluator = FakeEvaluator(
+        [
+            observation("unavailable"),
+            perf_observation(),
+            observation("unknown", False),
+            observation("unknown", False),
+            perf_observation("unknown"),
+        ]
+    )
+    result = asyncio.run(
+        BrushRunner(control, evaluator, journal).run(BrushRequest(lane(), "youtube"))
+    )
+    assert result["outcome"] == "unknown"
+    event_types = [
+        row[0]
+        for row in journal.db.execute(
+            "SELECT event_type FROM remediation_events ORDER BY id"
+        ).fetchall()
+    ]
+    assert event_types == [
+        "baseline",
+        "performance_before",
+        "deployment_mutation",
+        "candidate_observation",
+        "evaluator_retry",
+        "performance_after",
+        "rollback",
+    ]
+    with pytest.raises(BrushError, match="cooling down"):
+        asyncio.run(
+            BrushRunner(FakeControl([]), FakeEvaluator([]), journal).run(
+                BrushRequest(lane(), "youtube")
+            )
+        )
+
+
+def test_remediation_bounds_attempts_and_deadline():
+    with pytest.raises(BrushError, match="between 1 and 3"):
+        asyncio.run(
+            BrushRunner(FakeControl([]), FakeEvaluator([])).run(
+                BrushRequest(lane(), "youtube", attempts=4)
+            )
+        )
+    with pytest.raises(BrushError, match="between 60 and 900"):
+        asyncio.run(
+            BrushRunner(FakeControl([]), FakeEvaluator([])).run(
+                BrushRequest(lane(), "youtube", deadline_seconds=901)
+            )
+        )
 
 
 def test_performance_is_observation_only():

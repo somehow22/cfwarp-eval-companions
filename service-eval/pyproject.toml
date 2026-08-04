@@ -16,6 +16,9 @@ dependencies = [
 cfwarp-service-eval = "cfwarp_service_eval.cli:main"
 cfwarp-service-eval-api = "cfwarp_service_eval.api:main"
 cfwarp-brush = "cfwarp_service_eval.brush:main"
+cfwarp-eval-worker = "cfwarp_service_eval.worker:main"
+cfwarp-observation-reporter = "cfwarp_service_eval.reporter:main"
+cfwarp-telemetry-export-watch = "cfwarp_service_eval.telemetry_watch:main"
 
 [dependency-groups]
 dev = [

@@ -20,9 +20,9 @@ def parse_scenarios(raw: str | None) -> dict[str, str]:
 
 def parse_browser_execution(raw: str | None) -> str:
     value = (raw or "disabled").strip().lower()
-    if value not in {"disabled", "local", "agentcore"}:
+    if value not in {"disabled", "local", "agentcore", "external"}:
         raise ValueError(
-            "SERVICE_EVAL_BROWSER_EXECUTION must be disabled, local, or agentcore"
+            "SERVICE_EVAL_BROWSER_EXECUTION must be disabled, local, agentcore, or external"
         )
     return value
 
@@ -85,10 +85,14 @@ def resolve_scenario_capabilities(
                 )
             else:
                 reason = "enabled with local Chromium"
-        else:
+        elif browser_execution == "agentcore":
             execution_target = "agentcore"
             minimum_memory_mib = None
             reason = "enabled with cloud browser execution"
+        else:
+            execution_target = "external-worker"
+            minimum_memory_mib = None
+            reason = "enabled through a leased external browser worker"
 
         if scenario_enabled:
             enabled[scenario_id] = observation_id

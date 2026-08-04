@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/somehow22/cfwarp-eval-companions/contracts/observation-v2.schema.json",
+  "title": "cfwarp service observation v2",
+  "type": "object",
+  "required": [
+    "schema_version", "observation_id", "observed_at", "fresh_until",
+    "scenario_id", "scenario_provenance", "probe", "subject", "lane",
+    "egress", "result", "confidence_stage", "failure_layer", "latency_ms",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "observation_id": {"type": "string", "minLength": 1},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "fresh_until": {"type": "string", "format": "date-time"},
+    "scenario_id": {"type": "string", "minLength": 3},
+    "scenario_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog", "scenario_id", "definition_digest"],
+      "properties": {
+        "catalog": {"const": "scenarios-v1"},
+        "scenario_id": {"type": "string", "minLength": 3},
+        "definition_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "probe": {"type": "object"},
+    "subject": {
+      "type": "object",
+      "required": [
+        "deployment_origin", "instance_id", "node_id", "image_identity",
+        "config_generation", "config_digest", "evaluator_build"
+      ],
+      "properties": {
+        "deployment_origin": {"type": "string", "minLength": 1},
+        "instance_id": {"type": "string", "minLength": 1},
+        "node_id": {"type": "string", "minLength": 1},
+        "image_identity": {"type": "string", "minLength": 1},
+        "config_generation": {"type": "string", "minLength": 1},
+        "config_digest": {"type": "string", "minLength": 1},
+        "evaluator_build": {"type": "string", "minLength": 1}
+      }
+    },
+    "lane": {
+      "type": "object",
+      "required": [
+        "lane_id", "capability_id", "composition", "transport", "substrate",
+        "requested_region", "requested_region_raw", "cloudflare_proto",
+        "ip_proto_stack"
+      ],
+      "properties": {
+        "lane_id": {"type": "string", "minLength": 1},
+        "capability_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,31}-(?:[A-Z]{2})-(?:warp|masque)-(?:v4|v6)$"
+        },
+        "composition": {"type": "string", "minLength": 1},
+        "transport": {"type": "string", "minLength": 1},
+        "substrate": {"type": "string", "minLength": 1},
+        "requested_region": {"type": ["string", "null"], "pattern": "^[A-Z]{2}$"},
+        "requested_region_raw": {"type": ["string", "null"]},
+        "cloudflare_proto": {"enum": ["warp", "masque"]},
+        "ip_proto_stack": {"enum": ["v4", "v6"]}
+      }
+    },
+    "egress": {
+      "type": "object",
+      "required": ["warp", "region", "colo"],
+      "properties": {
+        "warp": {"type": ["string", "null"]},
+        "region": {"type": ["string", "null"]},
+        "colo": {"type": ["string", "null"]}
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["availability", "class", "eligible"],
+      "properties": {
+        "availability": {"enum": ["available", "unavailable", "unknown"]},
+        "class": {"type": "string", "minLength": 1},
+        "eligible": {"type": "boolean"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"availability": {"const": "unknown"}}, "required": ["availability"]},
+          "then": {"properties": {"eligible": {"const": false}}}
+        },
+        {
+          "if": {
+            "properties": {"availability": {"enum": ["available", "unavailable"]}},
+            "required": ["availability"]
+          },
+          "then": {"properties": {"eligible": {"const": true}}}
+        }
+      ]
+    },
+    "confidence_stage": {"type": "string", "minLength": 1},
+    "failure_layer": {"type": "string", "minLength": 1},
+    "latency_ms": {"type": ["integer", "null"], "minimum": 0},
+    "artifacts": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["kind", "path"],
+        "properties": {
+          "kind": {"type": "string", "minLength": 1},
+          "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"}
+        }
+      }
+    }
+  }
+}

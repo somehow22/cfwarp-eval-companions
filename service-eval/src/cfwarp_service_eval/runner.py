@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DIRECT_THROUGHPUT_FLOOR_MIBPS, SCENARIO_DEFINITIONS, Lane
+from .provenance import observation_v2
 
 
 class ProbeError(RuntimeError):
@@ -168,9 +169,11 @@ class ProbeRunner:
             raise ProbeError("probe exited without a summary")
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         observation = summary.get("observation")
-        if not isinstance(observation, dict) or observation.get("schema_version") != 1:
+        if not isinstance(observation, dict) or observation.get(
+            "schema_version"
+        ) not in {1, 2}:
             raise ProbeError("probe summary lacks Observation v1")
-        return observation
+        return observation_v2(observation, lane.public(), scenario_id)
 
     async def _run(self, command: list[str], timeout: int, check: bool = True) -> str:
         process = await asyncio.create_subprocess_exec(

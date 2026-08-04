@@ -11,8 +11,10 @@ register proxies or supply target URLs.
 
 ## Ownership and secret boundary
 
-`cfwarp-pro` owns this probe image, its scenarios, API contract, queue, and
-result semantics. Building and offline-testing the image requires no secret.
+`cfwarp-eval-companions` owns Observation v2, scenario/classification semantics,
+the observer/worker API, and evaluator images. `cfwarp-pro` owns deployment
+descriptors and supplies reviewed lane metadata to this runtime. Building and
+offline-testing the image requires no secret.
 Future deployment projects consume a reviewed image digest and project only
 the runtime inputs needed by one installation; they do not become the owner of
 the probe implementation.
@@ -30,8 +32,8 @@ because SecretOps performs the deployment.
 - yt-dlp is embedded through its Python API; normal CLI output is not parsed.
 - Python invocations write only `summary.json` and `verdict.txt` by default;
   browser scenarios may add one size-capped screenshot.
-- Every `summary.json` carries the same backend-independent, freshness-aware
-  `observation` v1 envelope described in
+- Every stored `summary.json` carries the same backend-independent,
+  freshness-aware Observation v2 envelope described in
   [`../docs/observation-slo-contract.md`](../docs/observation-slo-contract.md).
 - Raw page bodies, cookies, media URLs, and full yt-dlp metadata are not stored.
 - `browser/` is the Deno project for ChatGPT, Gemini, Google Search, and Reddit;
@@ -60,8 +62,9 @@ deno task check
 
 ## Unified REST API
 
-`cfwarp-service-eval-api` runs one persistent SQLite queue and one probe
-subprocess at a time. It reads the bearer token from
+`cfwarp-service-eval-api` is the slim `cfwarp-observer`: it runs the persistent
+SQLite queue, scheduler, retention, and API, but no probe subprocess in normal
+deployment. It reads the bearer token from
 `SERVICE_EVAL_TOKEN_FILE`, the read-only lane allowlist from
 `SERVICE_EVAL_LANES_FILE`, and stores bounded state below
 `SERVICE_EVAL_STATE_ROOT`. The API publishes only lane metadata; configured
@@ -71,11 +74,18 @@ proxy URLs never enter responses.
 `SERVICE_EVAL_METRICS_TOKEN_FILE`. If that variable is absent, it temporarily
 falls back to the API token so deployments can migrate without an outage.
 
-The authenticated `/v1` surface lists the fixed lanes/scenarios, accepts a run
-group, reports group state, and returns Observation v1 records. `/healthz` is
-unauthenticated and generic. `/docs`, `/redoc`, and `/openapi.json` require the
-same bearer token. Capacity is one active plus one waiting group; further
-submissions return `409`.
+The authenticated `/v1` surface remains readable during migration. `/v2/jobs`
+is the leased internal worker interface; `/v2/egresses` is exact-scenario,
+exact-generation discovery; and `/v2/platform-slo` is the platform-health
+surface. `/healthz` is unauthenticated and generic. `/docs`, `/redoc`, and
+`/openapi.json` require the same bearer token. Queue depth is bounded.
+Duplicate completion is idempotent, conflicting or expired leases fail closed,
+and worker loss cannot take down the observer API.
+
+Run workers from the same reviewed image with `cfwarp-eval-worker`. Set
+`CFWARP_WORKER_CLASS` to `light`, `perf`, or `browser`. Light and perf workers
+remain node-local; browser workers run centrally and reject listener addresses
+outside the Tailnet range or declared `.ts.net` names.
 
 CI or a clean sandbox should use the same locked install:
 
@@ -160,8 +170,11 @@ cfwarp-brush run \
   --scenario youtube \
   --socket /run/cfwarp/core.sock \
   --output /var/lib/cfwarp-brush/run \
+  --state-db /var/lib/cfwarp-brush/remediation.sqlite3 \
   --attempts 3 \
-  --strategy auto
+  --strategy auto \
+  --deadline-seconds 900 \
+  --cooldown-seconds 1800
 ```
 
 The baseline is evaluated before mutation. An already-available scenario
@@ -169,6 +182,18 @@ returns without rotating. Unknown or expired evidence fails closed. Changed-IP
 candidates are evaluated through the same canonical runner; eligible passes
 commit, eligible failures roll back, and an evaluator failure gets one retry on
 the same candidate before rollback.
+
+The durable journal stores the baseline and every candidate, evaluator retry,
+performance observation, rollback, and commit. Auto mode permits one reconnect
+and at most two identity candidates, has a 15-minute deadline, and begins a
+30-minute per-lane cooldown at the first deployment mutation. Tooling failure
+never authorizes a mutation.
+
+Central maintenance that explicitly requests a new WARP address adds
+`--force-change`. This preserves the same baseline, transactional candidate,
+canonical scenario evaluation, and rollback behavior, but it does not
+short-circuit when the baseline is already available. Unknown baseline evidence
+still fails closed.
 
 Every brush run records `performance_before`; every changed-IP candidate also
 records `performance_after`. Both use the canonical `perf` scenario, and
