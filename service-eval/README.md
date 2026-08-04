@@ -85,7 +85,9 @@ and worker loss cannot take down the observer API.
 Run workers from the same reviewed image with `cfwarp-eval-worker`. Set
 `CFWARP_WORKER_CLASS` to `light`, `perf`, or `browser`. Light and perf workers
 remain node-local; browser workers run centrally and reject listener addresses
-outside the Tailnet range or declared `.ts.net` names.
+outside the Tailnet range. A declared `.ts.net` browser listener is resolved
+once and pinned to its Tailnet IP before browser execution; a result that
+contains any non-Tailnet address is rejected.
 
 CI or a clean sandbox should use the same locked install:
 

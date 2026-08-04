@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -27,23 +28,54 @@ def tailnet_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> b
     return address in (TAILNET_V4 if address.version == 4 else TAILNET_V6)
 
 
-def private_listener(proxy: str) -> bool:
-    host = urlsplit(proxy).hostname
-    if host is None:
-        return False
-    if host.endswith(".ts.net"):
-        return True
+def tailnet_listener_endpoint(proxy: str) -> str | None:
+    """Pin a declared Tailnet proxy to an address safe for the browser worker.
+
+    A host name may resolve to a Tailnet address while it is checked and then
+    resolve to a public address when the browser process connects. Resolve it
+    once here, require every returned address to be Tailnet-private, and pass
+    the selected literal address to the runner instead of the host name.
+    """
+    try:
+        parsed = urlsplit(proxy)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "socks5h"
+        or host is None
+        or port is None
+        or parsed.username
+        or parsed.password
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         try:
-            addresses = {item[4][0] for item in socket.getaddrinfo(host, None)}
-        except OSError:
-            return False
-        return bool(addresses) and all(
-            tailnet_address(ipaddress.ip_address(item)) for item in addresses
-        )
-    return tailnet_address(address)
+            addresses = {
+                ipaddress.ip_address(item[4][0])
+                for item in socket.getaddrinfo(host, None)
+            }
+        except (OSError, ValueError):
+            return None
+        if not addresses or not all(tailnet_address(item) for item in addresses):
+            return None
+        address = min(addresses, key=lambda item: (item.version, int(item)))
+    if not tailnet_address(address):
+        return None
+    literal = str(address)
+    formatted_host = f"[{literal}]" if address.version == 6 else literal
+    return f"socks5h://{formatted_host}:{port}"
+
+
+def private_listener(proxy: str) -> bool:
+    """Compatibility predicate for Tailnet listener validation."""
+    return tailnet_listener_endpoint(proxy) is not None
 
 
 class Worker:
@@ -127,14 +159,20 @@ class Worker:
         response.raise_for_status()
         job = response.json()["job"]
         if job is None:
-            await client.post("/v2/workers/heartbeat", json=self.identity())
+            heartbeat = await client.post("/v2/workers/heartbeat", json=self.identity())
+            heartbeat.raise_for_status()
             return
         lane_payload = dict(job["lane"])
         lane_payload.pop("capability_id", None)
         lane = Lane(**lane_payload)
-        if self.worker_class == "browser" and not private_listener(lane.proxy):
-            await self.fail(client, job, "browser worker rejected non-private listener")
-            return
+        if self.worker_class == "browser":
+            pinned_proxy = tailnet_listener_endpoint(lane.proxy)
+            if pinned_proxy is None:
+                await self.fail(
+                    client, job, "browser worker rejected non-private listener"
+                )
+                return
+            lane = replace(lane, proxy=pinned_proxy)
         try:
             observation = await self.runner.run(
                 job["group_id"], lane, job["scenario_id"]

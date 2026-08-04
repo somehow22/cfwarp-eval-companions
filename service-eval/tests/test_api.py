@@ -447,6 +447,34 @@ def test_worker_loss_does_not_take_down_observer_or_heartbeat_api(
         assert api.runtime.store.heartbeat_stats("direct-de")["samples"] == 1
 
 
+def test_observer_global_metrics_are_not_duplicated_by_deployment_origin(
+    tmp_path, monkeypatch
+):
+    second = lane()
+    second.update(
+        {
+            "id": "direct-fr",
+            "instance_id": "cfwarp-direct-fr",
+            "requested_region": "FR",
+            "requested_region_raw": "FR",
+            "deployment_origin": "nexus",
+            "config_generation": "generation-2",
+        }
+    )
+    with client(tmp_path, monkeypatch, lanes_payload=[lane(), second]) as test_client:
+        metrics = test_client.get("/metrics", headers=metrics_auth()).text.splitlines()
+        queue = [
+            line for line in metrics if line.startswith("cfwarp_platform_queue_depth{")
+        ]
+        worker = [
+            line for line in metrics if line.startswith("cfwarp_platform_worker_up{")
+        ]
+        assert len(queue) == 1
+        assert 'node_id="proxy-host-1",scope="observer"' in queue[0]
+        assert len(worker) == 3
+        assert all("deployment_origin=" not in line for line in worker)
+
+
 def test_browser_capability_is_optional_and_disabled_by_default(tmp_path, monkeypatch):
     with client(tmp_path, monkeypatch) as test_client:
         enabled = {
