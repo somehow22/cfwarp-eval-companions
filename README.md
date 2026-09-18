@@ -129,7 +129,13 @@ appear in API responses.
 | `SERVICE_EVAL_BROWSER_MIN_MEMORY_MIB` | Local-browser memory floor; defaults to `768` |
 | `SERVICE_EVAL_HEARTBEAT_INTERVAL_SECONDS` | Liveness cadence |
 | `SERVICE_EVAL_SWEEP_INTERVAL_SECONDS` | Scenario cadence, scaled by tier |
+| `SERVICE_EVAL_RETENTION_INTERVAL_SECONDS` | Observer prune cadence; minimum 60 seconds, default 3600 |
+| `SERVICE_EVAL_RETENTION_DAYS` | Canonical history retention; default 14 days |
+| `SERVICE_EVAL_MAX_STATE_BYTES` | Observer state/artifact bound; default 512 MiB |
 | `SERVICE_EVAL_EMBEDDED_WORKER_ENABLED` | Legacy rollback mode; defaults to disabled |
+| `CFWARP_WORKER_LEASE_SECONDS` | Worker lease; must contain deadline, 15-second shutdown grace, and submission budget |
+| `CFWARP_WORKER_DEADLINE_SECONDS` | Worker execution deadline; default 180 seconds |
+| `CFWARP_WORKER_RESULT_SUBMISSION_SECONDS` | Result HTTP submission budget; default 30 seconds |
 | `CFWARP_OBSERVER_BUILD` | Immutable observer image/build identity |
 | `CFWARP_EVALUATOR_BUILD` | Immutable worker image/build identity |
 

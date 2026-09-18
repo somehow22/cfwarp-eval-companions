@@ -1,4 +1,6 @@
+import copy
 import json
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -78,6 +80,47 @@ def metrics_auth():
     return {"Authorization": f"Bearer {METRICS_TOKEN}"}
 
 
+def available_observation(build="test-build"):
+    now = datetime.now(timezone.utc)
+    raw = {
+        "schema_version": 1,
+        "observation_id": "worker-observation",
+        "observed_at": now.isoformat(),
+        "fresh_until": (now + timedelta(hours=24)).isoformat(),
+        "scenario_id": "youtube.anonymous_public_video",
+        "probe": {},
+        "subject": {},
+        "lane": {},
+        "egress": {"warp": "on", "region": "DE", "colo": "FRA"},
+        "result": {"availability": "available", "class": "pass", "eligible": True},
+        "confidence_stage": "single_observation",
+        "failure_layer": "none",
+        "latency_ms": 10,
+        "artifacts": [],
+    }
+    return observation_v2(
+        raw, api.runtime.lanes["direct-de"].public(), "youtube", build
+    )
+
+
+def claim_youtube(test_client):
+    created = test_client.post(
+        "/v1/run-groups",
+        headers=auth(),
+        json={"lane_ids": ["direct-de"], "scenario_ids": ["youtube"]},
+    )
+    assert created.status_code == 202
+    worker = {
+        "worker_id": "light-1",
+        "worker_class": "light",
+        "node_id": "proxy-host-1",
+        "evaluator_build": "test-build",
+        "metadata": {},
+        "lease_seconds": 240,
+    }
+    return test_client.post("/v2/jobs/claim", headers=auth(), json=worker).json()["job"]
+
+
 def test_health_is_generic_and_v1_rejects_missing_bearer(tmp_path, monkeypatch):
     with client(tmp_path, monkeypatch) as test_client:
         assert test_client.get("/healthz").json() == {"status": "ok"}
@@ -92,6 +135,39 @@ def test_health_fails_when_a_critical_background_loop_exits(tmp_path, monkeypatc
         response = test_client.get("/healthz")
         assert response.status_code == 503
         assert response.json() == {"detail": "service unavailable"}
+
+
+def test_retention_runs_with_embedded_workers_disabled(tmp_path, monkeypatch):
+    pruned = threading.Event()
+
+    def prune(_store, _artifact_root, retention_days, max_bytes):
+        assert retention_days == 14
+        assert max_bytes == 512 * 1024 * 1024
+        pruned.set()
+
+    monkeypatch.setattr(api.Store, "prune", prune)
+    with client(tmp_path, monkeypatch, embedded=False):
+        assert pruned.wait(2)
+
+
+def test_scheduler_lease_expiry_failure_is_sticky_platform_failure(
+    tmp_path, monkeypatch
+):
+    def fail_expiry(*_args, **_kwargs):
+        raise RuntimeError("sqlite write failed")
+
+    monkeypatch.setattr(api.Store, "expire_leases", fail_expiry)
+    with client(tmp_path, monkeypatch, scheduler=True, embedded=False) as test_client:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if len(api.runtime.background_failures) == 2:
+                break
+            time.sleep(0.01)
+        assert api.runtime.background_failures == {"lease-expiry", "probe-scheduler"}
+        assert test_client.get("/healthz").status_code == 503
+        snapshot = test_client.get("/v2/platform-slo", headers=auth()).json()
+        assert snapshot["observer_up"] is False
+        assert snapshot["background_failures"] == ["lease-expiry", "probe-scheduler"]
 
 
 def test_lane_response_redacts_proxy_and_post_rejects_ssrf_fields(
@@ -364,44 +440,9 @@ def test_node_scenario_allowlist_restricts_scheduling_and_api(tmp_path, monkeypa
 def test_leased_worker_completion_is_idempotent_and_discoverable(tmp_path, monkeypatch):
     monkeypatch.setenv("SERVICE_EVAL_SCENARIOS", "youtube")
     with client(tmp_path, monkeypatch, embedded=False) as test_client:
-        created = test_client.post(
-            "/v1/run-groups",
-            headers=auth(),
-            json={"lane_ids": ["direct-de"], "scenario_ids": ["youtube"]},
-        )
-        assert created.status_code == 202
-        worker = {
-            "worker_id": "light-1",
-            "worker_class": "light",
-            "node_id": "proxy-host-1",
-            "evaluator_build": "test-build",
-            "metadata": {},
-            "lease_seconds": 240,
-        }
-        claimed = test_client.post(
-            "/v2/jobs/claim", headers=auth(), json=worker
-        ).json()["job"]
+        claimed = claim_youtube(test_client)
         assert claimed["scenario_id"] == "youtube"
-        now = datetime.now(timezone.utc)
-        raw = {
-            "schema_version": 1,
-            "observation_id": "worker-observation",
-            "observed_at": now.isoformat(),
-            "fresh_until": (now + timedelta(hours=24)).isoformat(),
-            "scenario_id": "youtube.anonymous_public_video",
-            "probe": {},
-            "subject": {},
-            "lane": {},
-            "egress": {"warp": "on", "region": "DE", "colo": "FRA"},
-            "result": {"availability": "available", "class": "pass", "eligible": True},
-            "confidence_stage": "single_observation",
-            "failure_layer": "none",
-            "latency_ms": 10,
-            "artifacts": [],
-        }
-        observation = observation_v2(
-            raw, api.runtime.lanes["direct-de"].public(), "youtube", "test-build"
-        )
+        observation = available_observation()
         completion = {
             "lease_token": claimed["lease_token"],
             "observation": observation,
@@ -427,6 +468,111 @@ def test_leased_worker_completion_is_idempotent_and_discoverable(tmp_path, monke
         assert 'availability="available"} 1' in metrics
 
 
+def test_worker_completion_rejects_schema_and_all_claimed_provenance_drift(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SERVICE_EVAL_SCENARIOS", "youtube")
+    with client(tmp_path, monkeypatch, embedded=False) as test_client:
+        claimed = claim_youtube(test_client)
+        valid = available_observation()
+        invalid = []
+        for path, value in (
+            (("subject", "image_identity"), "wrong-image"),
+            (("subject", "config_digest"), "wrong-config"),
+            (("subject", "evaluator_build"), "wrong-evaluator"),
+            (("lane", "transport"), "wrong-transport"),
+            (("scenario_provenance", "definition_digest"), "sha256:" + "0" * 64),
+        ):
+            candidate = copy.deepcopy(valid)
+            candidate[path[0]][path[1]] = value
+            invalid.append(candidate)
+        missing_required = copy.deepcopy(valid)
+        del missing_required["latency_ms"]
+        invalid.append(missing_required)
+        too_many_artifacts = copy.deepcopy(valid)
+        too_many_artifacts["artifacts"] = [
+            {"kind": "summary", "path": f"artifact-{index}.json"} for index in range(4)
+        ]
+        invalid.append(too_many_artifacts)
+        absolute_artifact = copy.deepcopy(valid)
+        absolute_artifact["artifacts"] = [
+            {"kind": "summary", "path": "/private/summary.json"}
+        ]
+        invalid.append(absolute_artifact)
+
+        for observation in invalid:
+            response = test_client.post(
+                f"/v2/jobs/{claimed['task_id']}/complete",
+                headers=auth(),
+                json={
+                    "lease_token": claimed["lease_token"],
+                    "observation": observation,
+                },
+            )
+            assert response.status_code == 422
+            assert api.runtime.store.latest() == []
+
+        accepted = test_client.post(
+            f"/v2/jobs/{claimed['task_id']}/complete",
+            headers=auth(),
+            json={"lease_token": claimed["lease_token"], "observation": valid},
+        )
+        assert accepted.json() == {"disposition": "accepted"}
+
+
+def test_exact_discovery_rejects_stale_ineligible_wrong_generation_and_invalid(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SERVICE_EVAL_SCENARIOS", "youtube")
+    with client(tmp_path, monkeypatch, embedded=False) as test_client:
+        claimed = claim_youtube(test_client)
+        valid = available_observation()
+        response = test_client.post(
+            f"/v2/jobs/{claimed['task_id']}/complete",
+            headers=auth(),
+            json={"lease_token": claimed["lease_token"], "observation": valid},
+        )
+        assert response.status_code == 200
+        assert (
+            len(test_client.get("/v2/egresses?scenario=youtube", headers=auth()).json())
+            == 1
+        )
+
+        candidates = []
+        stale = copy.deepcopy(valid)
+        stale["fresh_until"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat()
+        candidates.append(stale)
+        ineligible = copy.deepcopy(valid)
+        ineligible["result"] = {
+            "availability": "unknown",
+            "class": "tooling_failure",
+            "eligible": False,
+        }
+        candidates.append(ineligible)
+        wrong_generation = copy.deepcopy(valid)
+        wrong_generation["subject"]["config_generation"] = "old-generation"
+        candidates.append(wrong_generation)
+        wrong_evaluator = copy.deepcopy(valid)
+        wrong_evaluator["subject"]["evaluator_build"] = "wrong-evaluator"
+        candidates.append(wrong_evaluator)
+        invalid = copy.deepcopy(valid)
+        del invalid["latency_ms"]
+        candidates.append(invalid)
+
+        for observation in candidates:
+            with api.runtime.store._lock, api.runtime.store.db:
+                api.runtime.store.db.execute(
+                    "UPDATE observations SET payload=? WHERE observation_id=?",
+                    (json.dumps(observation), valid["observation_id"]),
+                )
+            assert (
+                test_client.get("/v2/egresses?scenario=youtube", headers=auth()).json()
+                == []
+            )
+
+
 def test_worker_loss_does_not_take_down_observer_or_heartbeat_api(
     tmp_path, monkeypatch
 ):
@@ -444,7 +590,29 @@ def test_worker_loss_does_not_take_down_observer_or_heartbeat_api(
         snapshot = test_client.get("/v2/platform-slo", headers=auth()).json()
         assert snapshot["observer_up"] is True
         assert snapshot["workers_up"]["browser"] == 0
+        assert snapshot["required_worker_classes"] == ["light", "perf"]
         assert api.runtime.store.heartbeat_stats("direct-de")["samples"] == 1
+
+
+def test_node_local_workers_on_the_wrong_node_do_not_satisfy_platform_health(
+    tmp_path, monkeypatch
+):
+    with client(tmp_path, monkeypatch, embedded=False) as test_client:
+        heartbeat = {
+            "worker_id": "light-remote",
+            "worker_class": "light",
+            "node_id": "different-node",
+            "evaluator_build": "test-build",
+            "metadata": {},
+        }
+        assert (
+            test_client.post(
+                "/v2/workers/heartbeat", headers=auth(), json=heartbeat
+            ).status_code
+            == 200
+        )
+        snapshot = test_client.get("/v2/platform-slo", headers=auth()).json()
+        assert snapshot["workers_up"]["light"] == 0
 
 
 def test_observer_global_metrics_are_not_duplicated_by_deployment_origin(

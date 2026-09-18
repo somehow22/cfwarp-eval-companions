@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -413,6 +414,51 @@ def test_retention_removes_oldest_completed_group_and_artifacts(tmp_path):
     with pytest.raises(KeyError):
         store.group(group["id"])
     assert not (artifact_root / group["id"]).exists()
+
+
+def test_retention_serializes_with_other_canonical_writes(tmp_path, monkeypatch):
+    store = Store(tmp_path / "state" / "queue.sqlite3")
+    group = store.create_group(["direct-de"], ["youtube"])
+    store.complete_group(group["id"])
+    old = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+    with store.db:
+        store.db.execute(
+            "UPDATE run_groups SET finished_at=? WHERE id=?", (old, group["id"])
+        )
+
+    prune_entered = threading.Event()
+    allow_prune = threading.Event()
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    original_delete = store._delete_group
+
+    def blocked_delete(group_id, artifact_root):
+        prune_entered.set()
+        assert allow_prune.wait(2)
+        original_delete(group_id, artifact_root)
+
+    monkeypatch.setattr(store, "_delete_group", blocked_delete)
+    pruning = threading.Thread(
+        target=store.prune,
+        args=(tmp_path / "state" / "artifacts", 14, 512 * 1024 * 1024),
+    )
+
+    def write_heartbeat():
+        writer_started.set()
+        store.record_heartbeat("direct-de", {"ok": True})
+        writer_finished.set()
+
+    pruning.start()
+    assert prune_entered.wait(2)
+    writer = threading.Thread(target=write_heartbeat)
+    writer.start()
+    assert writer_started.wait(2)
+    assert not writer_finished.wait(0.1)
+    allow_prune.set()
+    pruning.join(2)
+    writer.join(2)
+    assert not pruning.is_alive()
+    assert writer_finished.is_set()
 
 
 def test_one_failed_beat_does_not_quarantine_a_lane(tmp_path):

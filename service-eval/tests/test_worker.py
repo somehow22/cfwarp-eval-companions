@@ -50,3 +50,17 @@ def test_idle_worker_fails_closed_when_heartbeat_is_rejected():
                 await worker.tick(client)
 
     asyncio.run(run())
+
+
+def test_worker_execution_and_submission_budget_must_fit_lease(tmp_path, monkeypatch):
+    token = tmp_path / "token"
+    token.write_text("worker-token-that-is-longer-than-thirty-two-characters")
+    monkeypatch.setenv("CFWARP_WORKER_TOKEN_FILE", str(token))
+    monkeypatch.setenv("CFWARP_WORKER_DEADLINE_SECONDS", "180")
+    monkeypatch.setenv("CFWARP_WORKER_RESULT_SUBMISSION_SECONDS", "30")
+    monkeypatch.setenv("CFWARP_WORKER_LEASE_SECONDS", "225")
+    assert Worker().lease_seconds == 225
+
+    monkeypatch.setenv("CFWARP_WORKER_LEASE_SECONDS", "224")
+    with pytest.raises(ValueError, match="must fit inside the lease"):
+        Worker()

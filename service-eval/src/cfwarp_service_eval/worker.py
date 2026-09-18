@@ -22,6 +22,7 @@ from .store import tree_size
 
 TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
 TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+PROBE_SHUTDOWN_GRACE_SECONDS = 15
 
 
 def tailnet_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -99,6 +100,24 @@ class Worker:
             os.environ.get("CFWARP_WORKER_HEARTBEAT_SECONDS", "60")
         )
         self.lease_seconds = int(os.environ.get("CFWARP_WORKER_LEASE_SECONDS", "240"))
+        self.deadline_seconds = int(
+            os.environ.get("CFWARP_WORKER_DEADLINE_SECONDS", "180")
+        )
+        self.result_submission_seconds = int(
+            os.environ.get("CFWARP_WORKER_RESULT_SUBMISSION_SECONDS", "30")
+        )
+        if (
+            self.deadline_seconds <= 0
+            or self.result_submission_seconds <= 0
+            or self.deadline_seconds
+            + PROBE_SHUTDOWN_GRACE_SECONDS
+            + self.result_submission_seconds
+            > self.lease_seconds
+        ):
+            raise ValueError(
+                "worker deadline, shutdown grace, and result-submission budget "
+                "must fit inside the lease"
+            )
         self.max_artifact_bytes = int(
             os.environ.get("CFWARP_WORKER_MAX_ARTIFACT_BYTES", str(512 * 1024 * 1024))
         )
@@ -110,7 +129,7 @@ class Worker:
         )
         self.runner = ProbeRunner(
             artifact_root,
-            int(os.environ.get("CFWARP_WORKER_DEADLINE_SECONDS", "180")),
+            self.deadline_seconds,
             browser_execution=(
                 os.environ.get("SERVICE_EVAL_BROWSER_EXECUTION", "local")
                 if self.worker_class == "browser"
@@ -133,7 +152,7 @@ class Worker:
         }
 
     async def run_forever(self) -> None:
-        timeout = httpx.Timeout(30.0, connect=10.0)
+        timeout = httpx.Timeout(float(self.result_submission_seconds), connect=10.0)
         async with httpx.AsyncClient(
             base_url=self.api_base,
             headers=self.headers,
@@ -244,7 +263,7 @@ def main() -> None:
         async with httpx.AsyncClient(
             base_url=worker.api_base,
             headers=worker.headers,
-            timeout=30,
+            timeout=float(worker.result_submission_seconds),
             follow_redirects=False,
         ) as client:
             await worker.tick(client)

@@ -299,9 +299,23 @@ def health_for(
     nodes = report["platform_slo"]["nodes"]
     if failures or any(not node.get("observer_up") for node in nodes):
         return "offTrack"
-    if any(node.get("hard_warp_off", 0) for node in nodes):
+    if any(node.get("background_failures") for node in nodes):
         return "offTrack"
-    if any(node.get("deployment_inventory_mismatch", 0) for node in nodes):
+    if any(node.get("deployment_inventory_mismatch") != 0 for node in nodes):
+        return "offTrack"
+    if any(
+        any(
+            node.get("workers_up", {}).get(worker_class, 0) < 1
+            for worker_class in node.get("required_worker_classes", ["light", "perf"])
+        )
+        for node in nodes
+    ):
+        return "offTrack"
+    if any(
+        node.get("evaluated_cells") != node.get("expected_cells")
+        or node.get("fresh_cells") != node.get("expected_cells")
+        for node in nodes
+    ):
         return "offTrack"
     if any(
         node.get("telemetry_export_age_seconds") is None

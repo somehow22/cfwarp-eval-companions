@@ -19,7 +19,7 @@ from .capabilities import (
     resolve_scenario_capabilities,
 )
 from .config import SCENARIOS, load_lanes
-from .provenance import evaluator_build
+from .provenance import evaluator_build, validate_observation_v2
 from .runner import ProbeRunner
 from .store import LeaseConflict, QueueFull, Store, parse_time, tree_size
 
@@ -157,6 +157,19 @@ class Runtime:
         )
         self.heartbeat_interval = env_int("SERVICE_EVAL_HEARTBEAT_INTERVAL_SECONDS", 60)
         self.sweep_interval = env_int("SERVICE_EVAL_SWEEP_INTERVAL_SECONDS", 6 * 3600)
+        self.retention_interval = env_int(
+            "SERVICE_EVAL_RETENTION_INTERVAL_SECONDS", 3600
+        )
+        self.retention_days = env_int("SERVICE_EVAL_RETENTION_DAYS", 14)
+        self.max_state_bytes = env_int(
+            "SERVICE_EVAL_MAX_STATE_BYTES", 512 * 1024 * 1024
+        )
+        if self.retention_interval < 60:
+            raise ValueError(
+                "SERVICE_EVAL_RETENTION_INTERVAL_SECONDS must be at least 60"
+            )
+        if self.retention_days <= 0 or self.max_state_bytes <= 0:
+            raise ValueError("retention days and maximum state bytes must be positive")
         self.startup_delay = env_int("SERVICE_EVAL_STARTUP_DELAY_SECONDS", 5)
         self.lane_chunk = env_int("SERVICE_EVAL_LANE_CHUNK", 5)
         self.heartbeat_enabled = env_flag("SERVICE_EVAL_HEARTBEAT_ENABLED")
@@ -186,6 +199,7 @@ class Runtime:
             self.spawn(self.heartbeat_loop, "probe-heartbeat")
         if self.scheduler_enabled:
             self.spawn(self.scheduler_loop, "probe-scheduler")
+        self.spawn(self.retention_loop, "probe-retention")
         self.wakeup.set()
 
     def spawn(self, target: Any, name: str) -> None:
@@ -261,16 +275,33 @@ class Runtime:
         if not await self.sleep_or_stop(self.startup_delay):
             return
         while not self.stop.is_set():
-            try:
-                self.store.expire_leases(
-                    {lane_id: lane.public() for lane_id, lane in self.lanes.items()},
-                    SCENARIOS,
-                )
-                self.enqueue_due_sweeps()
-                self.last_sweep_at = datetime.now(timezone.utc).isoformat()
-            except Exception:
-                pass
+            self.expire_leases()
+            self.enqueue_due_sweeps()
+            self.last_sweep_at = datetime.now(timezone.utc).isoformat()
             if not await self.sleep_or_stop(max(60, self.heartbeat_interval)):
+                return
+
+    def expire_leases(self) -> int:
+        try:
+            return self.store.expire_leases(
+                {lane_id: lane.public() for lane_id, lane in self.lanes.items()},
+                SCENARIOS,
+            )
+        except Exception:
+            self.background_failures.add("lease-expiry")
+            raise
+
+    async def retention_loop(self) -> None:
+        """Bound canonical SQLite and observer artifacts in every worker mode."""
+        if not await self.sleep_or_stop(self.startup_delay):
+            return
+        while not self.stop.is_set():
+            self.store.prune(
+                self.runner.artifact_root,
+                retention_days=self.retention_days,
+                max_bytes=self.max_state_bytes,
+            )
+            if not await self.sleep_or_stop(self.retention_interval):
                 return
 
     def enqueue_due_sweeps(self) -> int:
@@ -350,11 +381,6 @@ class Runtime:
                         type(error).__name__,
                     )
             self.store.complete_group(group["id"])
-            self.store.prune(
-                self.runner.artifact_root,
-                retention_days=14,
-                max_bytes=512 * 1024 * 1024,
-            )
 
 
 runtime: Runtime | None = None
@@ -591,11 +617,12 @@ def claim_job(body: ClaimRequest, _: WorkerProtected) -> dict[str, Any]:
         body.evaluator_build,
         body.metadata,
     )
-    runtime.store.expire_leases(
-        {lane_id: lane.public() for lane_id, lane in runtime.lanes.items()}, SCENARIOS
-    )
+    runtime.expire_leases()
     task = runtime.store.claim_task(
-        body.worker_id, body.worker_class, body.lease_seconds
+        body.worker_id,
+        body.worker_class,
+        body.lease_seconds,
+        body.evaluator_build,
     )
     if task is None:
         return {"job": None}
@@ -615,33 +642,21 @@ def claim_job(body: ClaimRequest, _: WorkerProtected) -> dict[str, Any]:
 
 
 def validate_completed_observation(
-    lane_id: str, scenario_id: str, observation: dict[str, Any]
+    lane_id: str,
+    scenario_id: str,
+    observation: dict[str, Any],
+    evaluator: str | None,
 ) -> None:
     assert runtime
-    lane = runtime.lanes[lane_id]
-    subject = observation.get("subject") or {}
-    lane_payload = observation.get("lane") or {}
-    result = observation.get("result") or {}
-    if observation.get("schema_version") != 2:
-        raise HTTPException(422, "worker completion must be Observation v2")
-    if observation.get("scenario_id") != SCENARIOS[scenario_id]:
-        raise HTTPException(422, "scenario provenance does not match leased job")
-    expected = {
-        "deployment_origin": lane.deployment_origin,
-        "instance_id": lane.instance_id,
-        "node_id": lane.node_id,
-        "config_generation": lane.config_generation,
-    }
-    if any(subject.get(key) != value for key, value in expected.items()):
-        raise HTTPException(422, "subject provenance does not match active deployment")
-    if lane_payload.get("capability_id") != lane.capability_id:
-        raise HTTPException(422, "capability identity does not match active deployment")
-    availability = result.get("availability")
-    eligible = result.get("eligible")
-    if (availability == "unknown" and eligible is not False) or (
-        availability in {"available", "unavailable"} and eligible is not True
-    ):
-        raise HTTPException(422, "availability and eligibility are inconsistent")
+    try:
+        validate_observation_v2(
+            observation,
+            runtime.lanes[lane_id].public(),
+            scenario_id,
+            evaluator,
+        )
+    except Exception as error:
+        raise HTTPException(422, f"invalid Observation v2: {error}") from error
 
 
 @app.post("/v2/jobs/{task_id}/complete")
@@ -649,12 +664,15 @@ def complete_job(
     task_id: int, body: CompletionRequest, _: WorkerProtected
 ) -> dict[str, str]:
     assert runtime
-    row = runtime.store.db.execute(
-        "SELECT lane_id,scenario_id FROM tasks WHERE id=?", (task_id,)
-    ).fetchone()
+    row = runtime.store.leased_task_context(task_id)
     if row is None:
         raise HTTPException(404, "job not found")
-    validate_completed_observation(row["lane_id"], row["scenario_id"], body.observation)
+    validate_completed_observation(
+        row["lane_id"],
+        row["scenario_id"],
+        body.observation,
+        row["lease_evaluator_build"],
+    )
     try:
         disposition = runtime.store.complete_leased_task(
             task_id, body.lease_token, body.observation
@@ -667,9 +685,7 @@ def complete_job(
 @app.post("/v2/jobs/{task_id}/fail")
 def fail_job(task_id: int, body: FailureRequest, _: WorkerProtected) -> dict[str, str]:
     assert runtime
-    row = runtime.store.db.execute(
-        "SELECT lane_id,scenario_id FROM tasks WHERE id=?", (task_id,)
-    ).fetchone()
+    row = runtime.store.leased_task_context(task_id)
     if row is None:
         raise HTTPException(404, "job not found")
     try:
@@ -712,6 +728,16 @@ def cell_summary(lanes: dict[str, Any], now: datetime) -> dict[str, Any]:
                 availability["unknown"] += 1
                 continue
             evaluated += 1
+            try:
+                validate_observation_v2(
+                    record["payload"],
+                    lane.public(),
+                    scenario_id,
+                    record["evaluator_build"],
+                )
+            except Exception:
+                availability["unknown"] += 1
+                continue
             if parse_time(record["fresh_until"]) <= now:
                 availability["unknown"] += 1
                 continue
@@ -735,15 +761,23 @@ def platform_slo_snapshot() -> dict[str, Any]:
     cells = cell_summary(runtime.lanes, now)
     workers = runtime.store.worker_statuses()
     worker_cutoff = now - timedelta(seconds=max(180, runtime.heartbeat_interval * 3))
+    active_node_ids = {lane.node_id for lane in runtime.lanes.values()}
     worker_up = {
         worker_class: sum(
             1
             for worker in workers
             if worker["worker_class"] == worker_class
+            and (worker_class == "browser" or worker["node_id"] in active_node_ids)
             and parse_time(worker["last_seen_at"]) >= worker_cutoff
         )
         for worker_class in ("light", "perf", "browser")
     }
+    required_worker_classes = ["light", "perf"]
+    if any(
+        capability["enabled"] and capability["execution_class"] == "browser"
+        for capability in runtime.scenario_capabilities
+    ):
+        required_worker_classes.append("browser")
     hard_warp_off = sum(
         1
         for lane_id in runtime.lanes
@@ -765,6 +799,7 @@ def platform_slo_snapshot() -> dict[str, Any]:
         "observer_build": runtime.observer_build,
         "observer_up": not runtime.background_failures,
         "workers_up": worker_up,
+        "required_worker_classes": required_worker_classes,
         **cells,
         "completeness": (
             cells["fresh_cells"] / cells["expected_cells"]
@@ -821,20 +856,22 @@ def egresses(
         ):
             continue
         record = runtime.store.latest_by_scenario(lane_id).get(scenario)
-        if record is None or parse_time(record["fresh_until"]) <= now:
+        if record is None:
             continue
         observation = record["payload"]
-        result = observation.get("result") or {}
-        subject = observation.get("subject") or {}
-        lane_payload = observation.get("lane") or {}
-        if not (
-            observation.get("schema_version") == 2
-            and result.get("availability") == "available"
-            and result.get("eligible") is True
-            and subject.get("config_generation") == lane.config_generation
-            and subject.get("deployment_origin") == lane.deployment_origin
-            and lane_payload.get("capability_id") == lane.capability_id
-        ):
+        try:
+            validate_observation_v2(
+                observation,
+                lane.public(),
+                scenario,
+                record["evaluator_build"],
+            )
+        except Exception:
+            continue
+        if parse_time(observation["fresh_until"]) <= now:
+            continue
+        result = observation["result"]
+        if result["availability"] != "available" or result["eligible"] is not True:
             continue
         discovered.append(
             {

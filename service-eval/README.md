@@ -82,12 +82,24 @@ surface. `/healthz` is unauthenticated and generic. `/docs`, `/redoc`, and
 Duplicate completion is idempotent, conflicting or expired leases fail closed,
 and worker loss cannot take down the observer API.
 
+Observer retention runs independently of embedded execution. It defaults to an
+hourly pass, 14 days, and 512 MiB; configure these with
+`SERVICE_EVAL_RETENTION_INTERVAL_SECONDS`, `SERVICE_EVAL_RETENTION_DAYS`, and
+`SERVICE_EVAL_MAX_STATE_BYTES`. Scheduler, lease-expiry, and retention failures
+make `/healthz` return 503 and appear in `/v2/platform-slo`.
+
 Run workers from the same reviewed image with `cfwarp-eval-worker`. Set
 `CFWARP_WORKER_CLASS` to `light`, `perf`, or `browser`. Light and perf workers
 remain node-local; browser workers run centrally and reject listener addresses
 outside the Tailnet range. A declared `.ts.net` browser listener is resolved
 once and pinned to its Tailnet IP before browser execution; a result that
 contains any non-Tailnet address is rejected.
+
+The worker refuses to start unless `CFWARP_WORKER_DEADLINE_SECONDS` plus the
+15-second subprocess shutdown grace and
+`CFWARP_WORKER_RESULT_SUBMISSION_SECONDS` fit within
+`CFWARP_WORKER_LEASE_SECONDS`. Defaults are 180 + 15 + 30 seconds within a
+240-second lease.
 
 CI or a clean sandbox should use the same locked install:
 

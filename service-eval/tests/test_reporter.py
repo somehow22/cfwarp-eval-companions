@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 import httpx
 
@@ -36,7 +37,11 @@ def report(observer_up=True, mismatch=0, warp_off=0):
                     "deployment_inventory_mismatch": mismatch,
                     "active_lane_count": 1,
                     "expected_cells": 2,
+                    "evaluated_cells": 2,
                     "fresh_cells": 2,
+                    "workers_up": {"light": 1, "perf": 1, "browser": 0},
+                    "required_worker_classes": ["light", "perf"],
+                    "background_failures": [],
                     "telemetry_export_age_seconds": 60,
                     "last_sweep_age_seconds": 60,
                 }
@@ -57,13 +62,57 @@ def report(observer_up=True, mismatch=0, warp_off=0):
 def test_health_policy_fails_closed_and_migration_stays_at_risk():
     assert health_for(report(observer_up=False), [], [], True) == "offTrack"
     assert health_for(report(mismatch=1), [], [], True) == "offTrack"
-    assert health_for(report(warp_off=1), [], [], True) == "offTrack"
+    assert health_for(report(warp_off=1), [], [], True) == "onTrack"
     missing_telemetry = report()
     missing_telemetry["platform_slo"]["nodes"][0]["telemetry_export_age_seconds"] = None
     assert health_for(missing_telemetry, [], [], True) == "offTrack"
     assert health_for(report(), [], [], False) == "atRisk"
     assert health_for(report(), [], [{"name": "warning"}], True) == "atRisk"
     assert health_for(report(), [], [], True) == "onTrack"
+
+
+def test_health_freshness_boundaries_are_inclusive():
+    boundary = report()
+    node = boundary["platform_slo"]["nodes"][0]
+    node["telemetry_export_age_seconds"] = 900
+    node["last_sweep_age_seconds"] = 86_400
+    assert health_for(boundary, [], [], True) == "onTrack"
+
+    node["telemetry_export_age_seconds"] = 900.001
+    assert health_for(boundary, [], [], True) == "offTrack"
+    node["telemetry_export_age_seconds"] = 900
+    node["last_sweep_age_seconds"] = 86_400.001
+    assert health_for(boundary, [], [], True) == "offTrack"
+
+
+def test_health_requires_workers_complete_fresh_evaluation_and_background_health():
+    missing_light = report()
+    missing_light["platform_slo"]["nodes"][0]["workers_up"]["light"] = 0
+    assert health_for(missing_light, [], [], True) == "offTrack"
+
+    incomplete = report()
+    incomplete["platform_slo"]["nodes"][0]["evaluated_cells"] = 1
+    assert health_for(incomplete, [], [], True) == "offTrack"
+
+    stale = report()
+    stale["platform_slo"]["nodes"][0]["fresh_cells"] = 1
+    assert health_for(stale, [], [], True) == "offTrack"
+
+    failed = report()
+    failed["platform_slo"]["nodes"][0]["background_failures"] = ["lease-expiry"]
+    assert health_for(failed, [], [], True) == "offTrack"
+
+
+def test_browser_worker_is_required_only_when_browser_capability_is_enabled():
+    lightweight = report()
+    assert health_for(lightweight, [], [], True) == "onTrack"
+
+    browser = report()
+    node = browser["platform_slo"]["nodes"][0]
+    node["required_worker_classes"].append("browser")
+    assert health_for(browser, [], [], True) == "offTrack"
+    node["workers_up"]["browser"] = 1
+    assert health_for(browser, [], [], True) == "onTrack"
 
 
 def test_daily_body_states_canonical_boundary():
@@ -103,8 +152,10 @@ def test_weekly_body_contains_exact_week_over_week_deltas():
 
 def test_reporter_store_retains_machine_report(tmp_path):
     store = ReporterStore(tmp_path / "reporter.sqlite3")
-    store.save("onTrack", report())
-    assert store.rolling(14) == [report()]
+    current = report()
+    current["generated_at"] = datetime.now(timezone.utc).isoformat()
+    store.save("onTrack", current)
+    assert store.rolling(14) == [current]
 
 
 def test_linear_status_update_uses_project_update_contract():

@@ -117,6 +117,7 @@ class Store:
             self._ensure_column("tasks", "lease_token", "TEXT")
             self._ensure_column("tasks", "lease_owner", "TEXT")
             self._ensure_column("tasks", "lease_expires_at", "TEXT")
+            self._ensure_column("tasks", "lease_evaluator_build", "TEXT")
             self._ensure_column("tasks", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("tasks", "completion_key", "TEXT")
 
@@ -513,6 +514,18 @@ class Store:
             result.append(item)
         return result
 
+    def leased_task_context(self, task_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.db.execute(
+                """
+                SELECT t.lane_id,t.scenario_id,t.lease_owner,t.lease_evaluator_build
+                FROM tasks t
+                WHERE t.id=?
+                """,
+                (task_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def expire_leases(
         self,
         lanes: Mapping[str, Mapping[str, Any]],
@@ -562,7 +575,11 @@ class Store:
         return expired
 
     def claim_task(
-        self, worker_id: str, worker_class: str, lease_seconds: int
+        self,
+        worker_id: str,
+        worker_class: str,
+        lease_seconds: int,
+        evaluator_build: str | None = None,
     ) -> dict[str, Any] | None:
         if worker_class not in WORKER_CLASSES:
             raise ValueError("unsupported worker class")
@@ -585,7 +602,8 @@ class Store:
             updated = self.db.execute(
                 """
                 UPDATE tasks SET status='running',started_at=COALESCE(started_at,?),
-                  lease_token=?,lease_owner=?,lease_expires_at=?,attempt_count=attempt_count+1
+                  lease_token=?,lease_owner=?,lease_expires_at=?,lease_evaluator_build=?,
+                  attempt_count=attempt_count+1
                 WHERE id=? AND status='queued'
                 """,
                 (
@@ -593,6 +611,7 @@ class Store:
                     lease_token,
                     worker_id,
                     expires.isoformat(),
+                    evaluator_build,
                     row["id"],
                 ),
             ).rowcount
@@ -612,6 +631,7 @@ class Store:
                     "lease_token": lease_token,
                     "lease_owner": worker_id,
                     "lease_expires_at": expires.isoformat(),
+                    "lease_evaluator_build": evaluator_build,
                     "attempt_count": row["attempt_count"] + 1,
                 }
             )
@@ -878,7 +898,11 @@ class Store:
         with self._lock:
             rows = self.db.execute(
                 """
-                SELECT scenario_id, payload, fresh_until FROM observations o WHERE lane_id=?
+                SELECT scenario_id, payload, fresh_until,
+                  (SELECT lease_evaluator_build FROM tasks
+                   WHERE group_id=o.group_id AND lane_id=o.lane_id
+                     AND scenario_id=o.scenario_id) AS evaluator_build
+                FROM observations o WHERE lane_id=?
                   AND observed_at=(SELECT max(observed_at) FROM observations
                     WHERE lane_id=o.lane_id AND scenario_id=o.scenario_id)
                 """,
@@ -888,6 +912,7 @@ class Store:
             row["scenario_id"]: {
                 "payload": json.loads(row["payload"]),
                 "fresh_until": row["fresh_until"],
+                "evaluator_build": row["evaluator_build"],
             }
             for row in rows
         }
