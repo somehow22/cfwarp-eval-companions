@@ -170,14 +170,16 @@ but ffmpeg is not required by this metadata-plus-bounded-range scenario.
 canonical identity is `youtube.anonymous_public_video_unlock`, version `1`,
 with definition digest
 `sha256:eee07d148db7c8f2ee0d291609b751b3fad1bc0ce7016bfc3f2e6bf59bc56860`.
-It pins yt-dlp's public, non-age-restricted test video `BaW_jenozKc`, performs
-anonymous metadata extraction with `download=False`, and requires at least one
-direct HTTP(S) format reference with an explicit audio or video codec. Missing
-codec metadata, malformed or non-HTTP(S) URLs, and DRM-marked references cannot
-pass. The stored reference excludes the signed media URL and headers. The probe
-sets yt-dlp `check_formats=False`, `skip_download=True`, and `download=False`,
-so it neither preflights nor downloads media bytes. It never imports browser
-cookies or accepts a caller-supplied video URL.
+It pins yt-dlp's current primary public, non-age-restricted test video
+`YE7VzlLtp-4`, which upstream selected after retiring unavailable fixture
+`BaW_jenozKc`. It performs anonymous metadata extraction with `download=False`
+and requires at least one direct HTTP(S) format reference with an explicit
+audio or video codec. Missing codec metadata, malformed or non-HTTP(S) URLs,
+and DRM-marked references cannot pass. The stored reference excludes the
+signed media URL and headers. The probe sets yt-dlp `check_formats=False`,
+`skip_download=True`, and `download=False`, so it neither preflights nor
+downloads media bytes. It never imports browser cookies or accepts a
+caller-supplied video URL.
 
 The locked evaluator uses yt-dlp 2026.7.4, the installed yt-dlp-ejs 0.8.0
 package, and Deno 2.9.2. Exact tool versions are checked before extraction;

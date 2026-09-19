@@ -75,6 +75,11 @@ def extracted_info(**metadata):
     }
 
 
+def test_unlock_uses_current_upstream_public_fixture() -> None:
+    assert FIXED_VIDEO_ID == "YE7VzlLtp-4"
+    assert FIXED_VIDEO_URL == "https://www.youtube.com/watch?v=YE7VzlLtp-4"
+
+
 def test_unlock_pass_requires_metadata_and_sanitized_format_reference(
     tmp_path: Path, monkeypatch, ready
 ) -> None:

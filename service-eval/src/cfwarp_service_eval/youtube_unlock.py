@@ -31,7 +31,9 @@ from .youtube import (
 )
 
 
-FIXED_VIDEO_ID = "BaW_jenozKc"
+# yt-dlp's primary public, age-unrestricted extractor fixture. It replaced the
+# retired BaW_jenozKc fixture in yt-dlp c102b2096525218a6918a46b415fb167786f9656.
+FIXED_VIDEO_ID = "YE7VzlLtp-4"
 FIXED_VIDEO_URL = f"https://www.youtube.com/watch?v={FIXED_VIDEO_ID}"
 PINNED_DENO_VERSION = "2.9.2"
 PINNED_EJS_VERSION = "0.8.0"
