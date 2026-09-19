@@ -1,5 +1,5 @@
 import { parseHTML } from "linkedom"
-import { collectDomFacts, pageObservationScript } from "../src/dom_facts.ts"
+import { collectDomFacts, domFactsScript, pageObservationScript } from "../src/dom_facts.ts"
 
 async function fixture(name: string): Promise<Document> {
   const html = await Deno.readTextFile(new URL(`../fixtures/${name}`, import.meta.url))
@@ -17,7 +17,7 @@ Deno.test("Gemini requires a visible enabled writable prompt control", async () 
 
   const invalid = collectDomFacts(
     await fixture("gemini-invalid-controls.html"),
-    "https://accounts.google.com/signin",
+    "https://gemini.google.com/app",
   )
   if (invalid.promptControlCount !== 0 || invalid.loginFormCount < 1) {
     throw new Error(`invalid Gemini DOM facts: ${JSON.stringify(invalid)}`)
@@ -44,4 +44,5 @@ Deno.test("Reddit requires a nonempty title and same-site comments permalink", a
 
 Deno.test("browser observation script remains executable JavaScript", () => {
   new Function(`return ${pageObservationScript()}`)
+  new Function(`return ${domFactsScript("https://gemini.google.com/app")}`)
 })

@@ -3,6 +3,8 @@ import type { BrowserObservation } from "./classify.ts"
 type DomFacts = BrowserObservation["dom"]
 
 export function collectDomFacts(document: Document, pageUrl: string): DomFacts {
+  const view = document.defaultView
+
   function visible(element: Element): boolean {
     for (let current: Element | null = element; current; current = current.parentElement) {
       if (
@@ -19,17 +21,52 @@ export function collectDomFacts(document: Document, pageUrl: string): DomFacts {
       ) {
         return false
       }
+      const computed = typeof view?.getComputedStyle === "function"
+        ? view.getComputedStyle(current)
+        : null
+      if (
+        computed?.display === "none" || computed?.visibility === "hidden" ||
+        computed?.visibility === "collapse" || computed?.opacity === "0" ||
+        computed?.contentVisibility === "hidden"
+      ) {
+        return false
+      }
     }
-    const view = document.defaultView
-    const computed = typeof view?.getComputedStyle === "function"
-      ? view.getComputedStyle(element)
-      : null
-    return computed?.display !== "none" && computed?.visibility !== "hidden" &&
-      computed?.visibility !== "collapse" && computed?.opacity !== "0"
+    if (typeof element.getClientRects === "function") {
+      return Array.from(element.getClientRects()).some(
+        (rect) => rect.width > 0 && rect.height > 0,
+      )
+    }
+    return true
+  }
+
+  function applicationPrompt(element: Element): boolean {
+    const marker = [
+      element.getAttribute("aria-label"),
+      element.getAttribute("placeholder"),
+      element.getAttribute("data-placeholder"),
+      element.getAttribute("data-testid"),
+      element.getAttribute("id"),
+      element.getAttribute("name"),
+    ].filter(Boolean).join(" ").toLowerCase()
+    if (/\b(?:search|feedback|comment|review)\b/.test(marker)) return false
+    let hostname = ""
+    try {
+      hostname = new URL(pageUrl).hostname.toLowerCase()
+    } catch {
+      return false
+    }
+    if (hostname === "gemini.google.com") {
+      return /\bgemini\b|\bprompt\b|\bcomposer\b|\binput-area\b/.test(marker)
+    }
+    if (hostname === "chatgpt.com" || hostname.endsWith(".chatgpt.com")) {
+      return /\bchatgpt\b|\bprompt\b|\bcomposer\b/.test(marker)
+    }
+    return false
   }
 
   function promptUsable(element: Element): boolean {
-    if (!visible(element)) return false
+    if (!applicationPrompt(element) || !visible(element)) return false
     if (
       element.hasAttribute("disabled") || element.matches(":disabled") ||
       element.getAttribute("aria-disabled") === "true" ||
@@ -70,21 +107,14 @@ export function collectDomFacts(document: Document, pageUrl: string): DomFacts {
   let publicPostTitlePermalinkCount = 0
   for (const post of postContainers) {
     if (!visible(post)) continue
-    const attributeTitle = post.getAttribute("post-title")?.trim() || ""
-    const attributePermalink = post.getAttribute("permalink")
-    if (attributeTitle && validRedditPermalink(attributePermalink)) {
-      publicPostTitlePermalinkCount += 1
-      continue
-    }
     const links = Array.from(post.querySelectorAll("a[href]"))
     if (
       links.some((link) => {
         if (!visible(link)) return false
         if (!validRedditPermalink(link.getAttribute("href"))) return false
-        const heading = link.matches("h1 a,h2 a,h3 a")
-          ? link
-          : link.querySelector("h1,h2,h3,[slot=title],[data-testid*=title]")
-        return Boolean(heading && visible(heading) && (heading.textContent || "").trim())
+        const title = link.closest("h1,h2,h3,[slot=title],[data-testid*=title]") ??
+          link.querySelector("h1,h2,h3,[slot=title],[data-testid*=title]")
+        return Boolean(title && visible(title) && (title.textContent || "").trim())
       })
     ) {
       publicPostTitlePermalinkCount += 1
@@ -124,5 +154,12 @@ export function pageObservationScript(): string {
         webdriver: navigator.webdriver,
       },
     };
+  })()`
+}
+
+export function domFactsScript(pageUrl: string): string {
+  return `(() => {
+    const collectDomFacts = ${collectDomFacts.toString()};
+    return collectDomFacts(document, ${JSON.stringify(pageUrl)});
   })()`
 }

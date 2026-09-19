@@ -172,6 +172,19 @@ Deno.test("Gemini account redirect is authentication required, not application e
   if (login.verdict !== "authentication_required" || login.pass) {
     throw new Error(`Gemini login redirect passed as ${login.verdict}`)
   }
+  const accountShellWithPromptCount = classify(
+    scenarios.gemini,
+    observation({
+      finalUrl: "https://accounts.google.com/",
+      title: "Google Accounts",
+      dom: { ...observation().dom, promptControlCount: 1 },
+    }),
+  )
+  if (accountShellWithPromptCount.verdict !== "unknown" || accountShellWithPromptCount.pass) {
+    throw new Error(
+      `Gemini account shell passed as ${accountShellWithPromptCount.verdict}`,
+    )
+  }
 })
 
 Deno.test("Gemini distinguishes bot challenge and rate limit", () => {

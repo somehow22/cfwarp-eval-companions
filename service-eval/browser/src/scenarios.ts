@@ -80,10 +80,7 @@ export const scenarios: Record<ServiceName, Scenario> = {
     version: "2",
     url: "https://gemini.google.com/app?hl=en",
     allowedDomains: ["google.com", "*.google.com", "gstatic.com", "*.gstatic.com"],
-    acceptedLocations: [
-      { hostname: "gemini.google.com", pathPattern: /^\/app(?:\/|$)/ },
-      { hostname: "accounts.google.com", pathPattern: /^\// },
-    ],
+    acceptedLocations: [{ hostname: "gemini.google.com", pathPattern: /^\/app(?:\/|$)/ }],
     requiredDom: "prompt_control",
     proxyBypass: "",
     fixture: null,

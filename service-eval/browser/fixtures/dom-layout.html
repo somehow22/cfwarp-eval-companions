@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head>
+    <style>
+    .css-hidden {
+      display: none;
+    }
+    .zero-layout {
+      position: absolute;
+      width: 0;
+      height: 0;
+      overflow: hidden;
+    }
+    </style>
+  </head>
+  <body>
+    <main>
+      <textarea aria-label="Ask Gemini"></textarea>
+      <section class="css-hidden">
+        <textarea aria-label="Ask Gemini hidden by stylesheet"></textarea>
+      </section>
+      <textarea aria-label="Search Gemini"></textarea>
+      <div contenteditable="true" aria-label="Send feedback"></div>
+    </main>
+    <article data-testid="post-container">
+      <h2><a href="/r/popular/comments/rendered/title/">Rendered title</a></h2>
+    </article>
+    <article data-testid="post-container" class="css-hidden">
+      <h2><a href="/r/popular/comments/hidden/title/">Stylesheet-hidden title</a></h2>
+    </article>
+    <article data-testid="post-container" class="zero-layout">
+      <h2><a href="/r/popular/comments/layoutless/title/">Layoutless title</a></h2>
+    </article>
+    <shreddit-post
+      post-title="Populated attribute shell"
+      permalink="/r/popular/comments/shell/not_rendered/"
+    ></shreddit-post>
+  </body>
+</html>

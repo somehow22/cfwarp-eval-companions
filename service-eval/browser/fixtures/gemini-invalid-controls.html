@@ -1,15 +1,17 @@
 <!doctype html>
 <html>
   <body>
-    <textarea hidden>hidden</textarea>
-    <textarea style="display: none">hidden by style</textarea>
-    <textarea style="opacity: 0">transparent</textarea>
+    <textarea hidden aria-label="Ask Gemini">hidden</textarea>
+    <textarea style="display: none" aria-label="Ask Gemini">hidden by style</textarea>
+    <textarea style="opacity: 0" aria-label="Ask Gemini">transparent</textarea>
     <section inert>
-      <textarea>inert</textarea>
+      <textarea aria-label="Ask Gemini">inert</textarea>
     </section>
-    <textarea disabled>disabled</textarea>
-    <textarea readonly>readonly</textarea>
-    <div contenteditable="false">not editable</div>
+    <textarea disabled aria-label="Ask Gemini">disabled</textarea>
+    <textarea readonly aria-label="Ask Gemini">readonly</textarea>
+    <textarea aria-label="Search Gemini">unrelated search</textarea>
+    <div contenteditable="true" aria-label="Send feedback">unrelated feedback</div>
+    <div contenteditable="false" aria-label="Ask Gemini">not editable</div>
     <div role="textbox">unrelated generic textbox</div>
     <input type="email" role="textbox" value="unrelated account control">
     <input type="search" role="textbox" value="unrelated search">

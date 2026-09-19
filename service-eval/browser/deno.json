@@ -2,7 +2,8 @@
   "tasks": {
     "probe": "deno run --allow-run=agent-browser --allow-read --allow-write --allow-net=127.0.0.1 --allow-env=PATH,HOME,USER,LOGNAME,TMPDIR,TMP,TEMP,XDG_RUNTIME_DIR,XDG_CACHE_HOME,LANG,LC_ALL,AWS_PROFILE,AGENTCORE_REGION,AGENTCORE_BROWSER_ID,AGENTCORE_SESSION_TIMEOUT,AGENT_BROWSER_EXECUTABLE_PATH src/main.ts",
     "test": "deno test --allow-read=fixtures",
-    "check": "deno check src/main.ts tests/*.ts && deno lint && deno fmt --check"
+    "test:chromium": "deno test --allow-run=agent-browser --allow-read=fixtures,agent-browser.json --allow-net=127.0.0.1 browser_checks/chromium_dom_check.ts",
+    "check": "deno check src/main.ts tests/*.ts browser_checks/*.ts && deno lint && deno fmt --check"
   },
   "compilerOptions": {
     "lib": ["deno.ns", "dom", "dom.iterable", "esnext"]
