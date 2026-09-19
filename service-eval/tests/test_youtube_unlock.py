@@ -11,6 +11,7 @@ from cfwarp_service_eval.youtube_unlock import (
     FIXED_VIDEO_URL,
     YouTubeUnlockConfig,
     extract_unlock_video,
+    pinned_deno_identity,
     run_probe,
     select_format_reference,
 )
@@ -35,8 +36,15 @@ def ready(monkeypatch):
         "cfwarp_service_eval.youtube_unlock.command_identity",
         lambda command: {
             "path": "/usr/bin/deno" if command == "deno" else None,
-            "version": "deno 2.9.2" if command == "deno" else None,
+            "version": (
+                "deno 2.9.2 (stable, release, x86_64-unknown-linux-gnu)"
+                if command == "deno"
+                else None
+            ),
         },
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.platform.machine", lambda: "x86_64"
     )
     monkeypatch.setattr(
         "cfwarp_service_eval.youtube_unlock.check_trace",
@@ -275,19 +283,86 @@ def test_unlock_reports_missing_javascript_runtime_as_tooling_failure(
 
 
 @pytest.mark.parametrize(
-    ("ejs_version", "deno_version"),
-    [("0.7.0", "deno 2.9.2"), ("0.8.0", "deno 2.9.7")],
+    ("identity", "machine"),
+    [
+        (
+            {
+                "path": "/usr/bin/deno",
+                "version": "deno 2.9.7 (stable, release, x86_64-unknown-linux-gnu)",
+            },
+            "x86_64",
+        ),
+        (
+            {
+                "path": "/usr/bin/deno",
+                "version": "deno 2.9.2-rc.1 (release candidate, x86_64-unknown-linux-gnu)",
+            },
+            "x86_64",
+        ),
+        (
+            {
+                "path": "/usr/bin/deno",
+                "version": "deno 2.9.2 (stable, release, aarch64-unknown-linux-gnu)",
+            },
+            "x86_64",
+        ),
+        ({"path": "/usr/bin/deno", "version": "deno 2.9.2"}, "x86_64"),
+        ({"path": None, "version": None}, "x86_64"),
+        ({"path": "/usr/bin/deno", "version": "unknown"}, "x86_64"),
+    ],
+)
+def test_pinned_deno_identity_rejects_wrong_or_unverified_runtime(
+    identity: dict[str, str | None], machine: str
+) -> None:
+    assert pinned_deno_identity(identity, machine) is False
+
+
+def test_pinned_deno_identity_accepts_real_pinned_output() -> None:
+    identity = {
+        "path": "/usr/bin/deno",
+        "version": "deno 2.9.2 (stable, release, x86_64-unknown-linux-gnu)",
+    }
+
+    assert pinned_deno_identity(identity, "x86_64") is True
+
+
+@pytest.mark.parametrize(
+    ("yt_dlp_version", "ejs_version", "deno_version"),
+    [
+        (
+            "2026.7.4",
+            "0.7.0",
+            "deno 2.9.2 (stable, release, x86_64-unknown-linux-gnu)",
+        ),
+        (
+            "2026.7.4",
+            "0.8.0",
+            "deno 2.9.7 (stable, release, x86_64-unknown-linux-gnu)",
+        ),
+        (
+            "2026.7.5",
+            "0.8.0",
+            "deno 2.9.2 (stable, release, x86_64-unknown-linux-gnu)",
+        ),
+    ],
 )
 def test_unlock_requires_exact_solver_and_runtime_versions(
-    tmp_path: Path, monkeypatch, ejs_version: str, deno_version: str
+    tmp_path: Path,
+    monkeypatch,
+    yt_dlp_version: str,
+    ejs_version: str,
+    deno_version: str,
 ) -> None:
     monkeypatch.setattr(
         "cfwarp_service_eval.youtube_unlock.importlib.metadata.version",
-        lambda package: ejs_version if package == "yt-dlp-ejs" else "2026.7.4",
+        lambda package: ejs_version if package == "yt-dlp-ejs" else yt_dlp_version,
     )
     monkeypatch.setattr(
         "cfwarp_service_eval.youtube_unlock.command_identity",
         lambda _command: {"path": "/usr/bin/deno", "version": deno_version},
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.platform.machine", lambda: "x86_64"
     )
     monkeypatch.setattr(
         "cfwarp_service_eval.youtube_unlock.check_trace",

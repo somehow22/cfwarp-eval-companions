@@ -1,0 +1,98 @@
+name: Docker - Service Evaluation Worker Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Full commit SHA already reachable from main
+        required: true
+        type: string
+
+concurrency:
+  group: docker-service-eval-worker-candidate
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.source_revision }}
+
+      - name: Verify exact published source
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_REVISION"
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          test "$(git rev-parse origin/main)" = "$SOURCE_REVISION"
+
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: pkg
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        shell: bash
+        run: |
+          echo "version=worker-candidate-${SOURCE_REVISION}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v7
+        id: build
+        with:
+          context: .
+          file: service-eval/Dockerfile
+          target: worker
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/cfwarp-eval-worker:candidate-${{ inputs.source_revision }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ inputs.source_revision }}
+            org.opencontainers.image.version=worker-candidate-${{ inputs.source_revision }}
+          build-args: |
+            VERSION=${{ steps.pkg.outputs.version }}
+            COMMIT=${{ inputs.source_revision }}
+            BUILD_DATE=${{ steps.pkg.outputs.date }}
+          cache-from: type=gha,scope=service-eval-worker-amd64
+          cache-to: type=gha,mode=max,scope=service-eval-worker-amd64
+
+      - name: Smoke the published worker artifact
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/cfwarp-eval-worker@${{ steps.build.outputs.digest }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$IMAGE"
+          test "$(docker image inspect "$IMAGE" --format '{{.Architecture}}/{{.Os}}')" = "amd64/linux"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.cfwarp.component"}}')" = "worker"
+          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_REVISION"
+          test "$(docker image inspect "$IMAGE" --format '{{json .Config.Entrypoint}}')" = '["cfwarp-eval-worker"]'
+          test "$(docker image inspect "$IMAGE" --format '{{.Config.User}}')" = "10001:10001"
+          docker run --rm --platform linux/amd64 --entrypoint /bin/sh "$IMAGE" -ec '
+            test "$(uname -m)" = x86_64
+            test "$(deno --version | sed -n "1p")" = "deno 2.9.2 (stable, release, x86_64-unknown-linux-gnu)"
+            python -c "import importlib.metadata as m; assert m.version(\"yt-dlp\") == \"2026.7.4\"; assert m.version(\"yt-dlp-ejs\") == \"0.8.0\"; import cfwarp_service_eval.worker, cfwarp_service_eval.youtube_unlock"
+          '
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/cfwarp-eval-worker
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

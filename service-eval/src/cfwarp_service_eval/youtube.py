@@ -152,7 +152,10 @@ def command_identity(command: str) -> dict[str, str | None]:
             text=True,
             timeout=5,
         )
-        first_line = (completed.stdout or completed.stderr).splitlines()[0]
+        if completed.returncode != 0:
+            first_line = "unknown"
+        else:
+            first_line = (completed.stdout or completed.stderr).splitlines()[0]
     except (OSError, subprocess.SubprocessError, IndexError):
         first_line = "unknown"
     return {"path": path, "version": first_line[:300]}

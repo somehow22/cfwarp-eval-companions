@@ -11,6 +11,7 @@ from cfwarp_service_eval.youtube import (
     YouTubeConfig,
     canonical_video_url,
     classify_legacy_failure,
+    command_identity,
     parse_trace,
     redact_proxy,
     redact_text,
@@ -26,6 +27,25 @@ def test_parse_trace_keeps_only_key_value_lines() -> None:
         "warp": "on",
         "loc": "GB",
     }
+
+
+def test_command_identity_rejects_nonzero_version_command(
+    monkeypatch,
+) -> None:
+    class FailedVersion:
+        returncode = 1
+        stdout = "deno 2.9.2 (stable, release, x86_64-unknown-linux-gnu)\n"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube.shutil.which", lambda _name: "/bin/tool"
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube.subprocess.run",
+        lambda *_args, **_kwargs: FailedVersion(),
+    )
+
+    assert command_identity("deno") == {"path": "/bin/tool", "version": "unknown"}
 
 
 def test_redact_proxy_credentials_and_query() -> None:

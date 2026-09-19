@@ -53,6 +53,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 ENTRYPOINT ["cfwarp-service-eval-api"]
 
 FROM python-runtime AS worker
+ARG DENO_VERSION
+USER root
+COPY --from=deno /deno /usr/local/bin/deno
+RUN test "$(deno --version | sed -n '1p')" = \
+    "deno ${DENO_VERSION} (stable, release, x86_64-unknown-linux-gnu)"
+USER 10001:10001
 LABEL io.cfwarp.component="worker"
 ENTRYPOINT ["cfwarp-eval-worker"]
 

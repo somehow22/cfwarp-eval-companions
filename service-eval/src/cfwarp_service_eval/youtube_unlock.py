@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.metadata
 import json
 import platform
+import re
 import signal
 import shutil
 import threading
@@ -34,7 +35,18 @@ FIXED_VIDEO_ID = "BaW_jenozKc"
 FIXED_VIDEO_URL = f"https://www.youtube.com/watch?v={FIXED_VIDEO_ID}"
 PINNED_DENO_VERSION = "2.9.2"
 PINNED_EJS_VERSION = "0.8.0"
+PINNED_YT_DLP_VERSION = "2026.7.4"
 IN_FLIGHT: dict[str, Any] = {}
+DENO_VERSION_PATTERN = re.compile(
+    r"^deno (?P<version>[0-9]+\.[0-9]+\.[0-9]+) "
+    r"\(stable, release, (?P<target>x86_64|aarch64)-unknown-linux-gnu\)$"
+)
+MACHINE_TO_DENO_TARGET = {
+    "AMD64": "x86_64",
+    "ARM64": "aarch64",
+    "aarch64": "aarch64",
+    "x86_64": "x86_64",
+}
 
 
 @dataclass(frozen=True)
@@ -53,6 +65,21 @@ class YouTubeUnlockConfig:
     transport: str | None = None
     substrate_profile: str | None = None
     requested_region: str | None = None
+
+
+def pinned_deno_identity(
+    identity: dict[str, str | None], machine: str | None = None
+) -> bool:
+    if not identity.get("path") or not isinstance(identity.get("version"), str):
+        return False
+    match = DENO_VERSION_PATTERN.fullmatch(identity["version"])
+    expected_target = MACHINE_TO_DENO_TARGET.get(machine or platform.machine())
+    return bool(
+        match
+        and expected_target
+        and match.group("version") == PINNED_DENO_VERSION
+        and match.group("target") == expected_target
+    )
 
 
 def select_format_reference(info: dict[str, Any]) -> dict[str, Any] | None:
@@ -192,9 +219,9 @@ def _run_probe(config: YouTubeUnlockConfig) -> tuple[dict[str, Any], int]:
         return finish(config.output, summary), 2
 
     if (
-        tools["yt_dlp_ejs"]["version"] != PINNED_EJS_VERSION
-        or not tools["deno"]["path"]
-        or tools["deno"]["version"] != f"deno {PINNED_DENO_VERSION}"
+        tools["yt_dlp"]["version"] != PINNED_YT_DLP_VERSION
+        or tools["yt_dlp_ejs"]["version"] != PINNED_EJS_VERSION
+        or not pinned_deno_identity(tools["deno"])
     ):
         summary["verdict"] = "tooling_failure"
         summary["failure_layer"] = "tooling"

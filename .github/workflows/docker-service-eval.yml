@@ -2,13 +2,7 @@ name: Docker - Service Evaluation API
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-    paths:
-      - contracts/**
-      - service-eval/**
-      - .github/workflows/docker-service-eval.yml
-  workflow_dispatch:
 
 concurrency:
   group: docker-service-eval-${{ github.workflow }}-${{ github.ref }}
