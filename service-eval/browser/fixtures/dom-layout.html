@@ -11,6 +11,11 @@
       height: 0;
       overflow: hidden;
     }
+    .positive-layout {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+    }
     </style>
   </head>
   <body>
@@ -30,6 +35,15 @@
     </article>
     <article data-testid="post-container" class="zero-layout">
       <h2><a href="/r/popular/comments/layoutless/title/">Layoutless title</a></h2>
+    </article>
+    <article data-testid="post-container">
+      <h2>
+        <a
+          id="hidden-descendant-title"
+          class="positive-layout"
+          href="/r/popular/comments/hidden-descendant/title/"
+        ><span class="css-hidden">Hidden descendant only</span></a>
+      </h2>
     </article>
     <shreddit-post
       post-title="Populated attribute shell"

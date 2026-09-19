@@ -90,6 +90,26 @@ export function collectDomFacts(document: Document, pageUrl: string): DomFacts {
     }
   }
 
+  function renderedText(element: Element): string {
+    const browserText = (element as HTMLElement).innerText
+    if (
+      typeof element.getClientRects === "function" &&
+      typeof browserText === "string"
+    ) {
+      return browserText.trim()
+    }
+
+    function structuralText(node: Node): string {
+      if (node.nodeType === 3) return node.nodeValue || ""
+      if (node.nodeType !== 1) return ""
+      const child = node as Element
+      if (!visible(child)) return ""
+      return Array.from(child.childNodes).map(structuralText).join(" ")
+    }
+
+    return Array.from(element.childNodes).map(structuralText).join(" ").trim()
+  }
+
   const promptControlCount = Array.from(
     document.querySelectorAll(
       "textarea,[contenteditable=true]",
@@ -114,7 +134,7 @@ export function collectDomFacts(document: Document, pageUrl: string): DomFacts {
         if (!validRedditPermalink(link.getAttribute("href"))) return false
         const title = link.closest("h1,h2,h3,[slot=title],[data-testid*=title]") ??
           link.querySelector("h1,h2,h3,[slot=title],[data-testid*=title]")
-        return Boolean(title && visible(title) && (title.textContent || "").trim())
+        return Boolean(title && visible(title) && renderedText(title))
       })
     ) {
       publicPostTitlePermalinkCount += 1

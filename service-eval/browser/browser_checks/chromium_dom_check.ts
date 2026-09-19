@@ -67,6 +67,26 @@ Deno.test("Chromium rejects stylesheet-hidden and attribute-only capability shel
     if (redditFacts.publicPostTitlePermalinkCount !== 1) {
       throw new Error(`Chromium Reddit facts: ${JSON.stringify(redditFacts)}`)
     }
+    const counterexampleData = await command(session, [
+      "eval",
+      `(() => {
+        const anchor = document.querySelector('#hidden-descendant-title');
+        const rect = anchor.getBoundingClientRect();
+        return {
+          positiveLayout: rect.width > 0 && rect.height > 0,
+          rawText: anchor.textContent.trim(),
+          renderedText: anchor.innerText.trim(),
+        };
+      })()`,
+    ])
+    const counterexample = counterexampleData.result as Record<string, unknown>
+    if (
+      counterexample.positiveLayout !== true ||
+      counterexample.rawText !== "Hidden descendant only" ||
+      counterexample.renderedText !== ""
+    ) {
+      throw new Error(`invalid Chromium counterexample: ${JSON.stringify(counterexample)}`)
+    }
   } finally {
     await command(session, ["close"]).catch(() => undefined)
     abort.abort()
