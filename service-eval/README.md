@@ -172,17 +172,24 @@ with definition digest
 `sha256:eee07d148db7c8f2ee0d291609b751b3fad1bc0ce7016bfc3f2e6bf59bc56860`.
 It pins yt-dlp's public, non-age-restricted test video `BaW_jenozKc`, performs
 anonymous metadata extraction with `download=False`, and requires at least one
-direct HTTP(S) audio or video format reference. The stored reference excludes
-the signed media URL and headers. The probe never downloads media, imports
-browser cookies, or accepts a caller-supplied video URL.
+direct HTTP(S) format reference with an explicit audio or video codec. Missing
+codec metadata, malformed or non-HTTP(S) URLs, and DRM-marked references cannot
+pass. The stored reference excludes the signed media URL and headers. The probe
+sets yt-dlp `check_formats=False`, `skip_download=True`, and `download=False`,
+so it neither preflights nor downloads media bytes. It never imports browser
+cookies or accepts a caller-supplied video URL.
 
-The locked evaluator uses yt-dlp 2026.7.4, yt-dlp-ejs 0.8.0, and yt-dlp's
-maintained `ejs:npm` remote-component mechanism with an available supported
-JavaScript runtime. Per-operation timeout defaults to 25 seconds, the whole
-probe deadline is 120 seconds, there are at most two attempts, and the catalog
-artifact limit is 2 MiB. Only network failures retry; bot challenge,
-authentication requirement, rate limit, geographic/service denial, unexpected
-content, and tooling failure stop immediately.
+The locked evaluator uses yt-dlp 2026.7.4, the installed yt-dlp-ejs 0.8.0
+package, and Deno 2.9.2. Exact tool versions are checked before extraction;
+remote yt-dlp components and all other JavaScript runtimes are disabled. The
+Deno provider runs without remote imports, a lock file, node modules, prompts,
+or code-cache writes; yt-dlp's own cache is disabled. Per-operation network
+timeout defaults to 25 seconds. Both the evaluator's whole-process deadline and
+scheduled process-group supervision are capped at the catalog's 120 seconds.
+There are at most two attempts and the catalog artifact limit is 2 MiB. Only
+network failures retry; bot challenge, authentication requirement, rate limit,
+geographic/service denial, unexpected content, and tooling failure stop
+immediately.
 
 ```bash
 uv run cfwarp-service-eval youtube-unlock \
@@ -193,11 +200,11 @@ uv run cfwarp-service-eval youtube-unlock \
 ```
 
 An immutable publication must pin the evaluator image by digest, retain the
-locked Python dependencies and a supported JavaScript runtime, set
+locked Python dependencies, installed solver package, and exact Deno runtime, set
 `CFWARP_EVALUATOR_BUILD`, and publish the exact Observation v2 scenario
 provenance generated from the catalog definition. A local success is
 availability evidence only; it is not permission to publish an image or claim
-other lanes or regions.
+other videos, playback/streaming, authenticated use, lanes, or regions.
 
 ## Priority browser scenarios
 

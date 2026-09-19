@@ -1,4 +1,5 @@
 import type { BrowserObservation } from "./classify.ts"
+import { pageObservationScript } from "./dom_facts.ts"
 import type { Scenario } from "./scenarios.ts"
 
 interface CommandResult {
@@ -172,9 +173,7 @@ export class AgentBrowser {
       text: string
       dom: BrowserObservation["dom"]
       profile: BrowserEvidence["profile"]
-    }>(
-      "({status: performance.getEntriesByType('navigation')[0]?.responseStatus ?? null, title: document.title, url: location.href, text: document.body?.innerText?.slice(0, 12000) ?? '', dom: {promptControlCount: document.querySelectorAll('textarea,[contenteditable=true],[role=textbox]:not(input[type=search])').length, searchControlCount: document.querySelectorAll('[role=search],input[type=search],input[name=q],textarea[name=q]').length, searchResultCount: document.querySelectorAll('#search a[href] h3,#rso a[href] h3').length, publicPostCount: document.querySelectorAll('shreddit-post,article[data-testid*=post],[data-testid=post-container]').length, publicPostTitlePermalinkCount: document.querySelectorAll('shreddit-post[post-title][permalink],article h1 a[href*=\"/comments/\"],article h2 a[href*=\"/comments/\"],article h3 a[href*=\"/comments/\"],[data-testid=post-container] h3 a[href*=\"/comments/\"]').length, loginFormCount: document.querySelectorAll('form input[type=password],form[action*=login],form[action*=signin]').length, turnstileWidgetCount: document.querySelectorAll('[name=cf-turnstile-response],iframe[src*=\"challenges.cloudflare\"]').length}, profile: {userAgent: navigator.userAgent, locale: navigator.language, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, viewport: {width: innerWidth, height: innerHeight, devicePixelRatio}, webRtcAvailable: typeof RTCPeerConnection !== 'undefined', webdriver: navigator.webdriver}})",
-    )
+    }>(pageObservationScript())
     const snapshotEnvelope = await this.#command(["snapshot", "-i", "-c", "-d", "4"])
     const snapshotData = envelopeData(snapshotEnvelope.stdout)
     const snapshot = isRecord(snapshotData) && typeof snapshotData.snapshot === "string"

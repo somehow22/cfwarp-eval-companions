@@ -232,9 +232,9 @@ def ydl_options(config: YouTubeConfig, logger: CapturedLogger) -> dict[str, Any]
         "cachedir": False,
         "noprogress": True,
         "js_runtimes": js_runtimes,
-        # yt-dlp's maintained EJS challenge solver. This uses the locked
-        # yt-dlp-ejs package and never imports a browser profile or cookies.
-        "remote_components": ["ejs:npm"],
+        # Only installed, lockfile-verified challenge components are allowed.
+        # Live npm/GitHub solver retrieval is outside this evaluator milestone.
+        "remote_components": [],
         "cookiefile": None,
         "cookiesfrombrowser": None,
     }
@@ -589,7 +589,11 @@ def failure_layer(outcome: str) -> str:
 
 def classify_legacy_failure(message: str) -> str:
     outcome = classify_failure(message)
-    return "auth_required" if outcome == "authentication_required" else outcome
+    if outcome == "authentication_required":
+        return "auth_required"
+    if outcome == "rate_limited":
+        return "extractor_failure"
+    return outcome
 
 
 def finish(output: Path, summary: dict[str, Any]) -> dict[str, Any]:

@@ -109,17 +109,23 @@ def test_direct_yt_dlp_configuration_disables_environment_proxy(tmp_path: Path) 
     assert ydl_options(direct, CapturedLogger())["proxy"] == ""
 
 
-def test_yt_dlp_configuration_is_anonymous_and_enables_maintained_ejs(
+def test_yt_dlp_configuration_is_anonymous_and_disables_remote_components(
     tmp_path: Path,
 ) -> None:
     options = ydl_options(config(tmp_path), CapturedLogger())
     assert options["cookiefile"] is None
     assert options["cookiesfrombrowser"] is None
-    assert options["remote_components"] == ["ejs:npm"]
+    assert options["remote_components"] == []
 
 
 def test_historical_transfer_scenario_keeps_auth_required_class() -> None:
     assert classify_legacy_failure("Login required") == "auth_required"
+
+
+def test_historical_transfer_scenario_keeps_429_as_extractor_failure() -> None:
+    assert classify_legacy_failure("HTTP Error 429: Too Many Requests") == (
+        "extractor_failure"
+    )
 
 
 def test_probe_stops_before_service_when_trace_is_not_warp(

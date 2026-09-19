@@ -110,13 +110,16 @@ scenario pack.
 `gemini.anonymous_entry` version `2` has definition digest
 `sha256:a836627f65e5b7e105a303c29a6ded52c31728b2fdbdf645c2e49bb72cde8174`. A pass requires the
 Gemini application URL plus an application prompt control in a clean anonymous session and no
-geo/access denial. A redirect to generic Google account login is `authentication_required`; it does
-not prove Gemini is usable, and this evaluator never submits a prompt or authenticates.
+geo/access denial. The prompt control must be visible, enabled, and writable; hidden, inert,
+disabled, readonly, and unrelated form controls do not qualify. A redirect to generic Google account
+login is `authentication_required`; it does not prove Gemini is usable, and this evaluator never
+submits a prompt or authenticates.
 
 `reddit.anonymous_public_listing` version `2` has definition digest
 `sha256:268ef4adfc187b9f671a0be9f83c4322666c63a4186a682c211f31ff22468d53`. A pass requires
 `/r/popular/` and at least one rendered public post whose title is paired with a Reddit comments
-permalink. HTTP 200, Reddit branding, an app shell, or a login page is insufficient.
+permalink on reddit.com. Empty or hidden titles, empty permalinks, off-origin links, HTTP 200,
+Reddit branding, an app shell, or a login page are insufficient.
 
 Both scenarios use agent-browser 0.31.2 with Deno 2.9.2, a fresh profile, no credential/profile
 environment, a 45-second command timeout, a 120-second default whole-probe deadline, at most one

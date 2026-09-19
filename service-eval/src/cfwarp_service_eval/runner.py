@@ -120,14 +120,20 @@ class ProbeRunner:
             common += ["--substrate-profile", lane.substrate_profile]
         if lane.requested_region:
             common += ["--requested-region", lane.requested_region]
+        subprocess_deadline = self.deadline_seconds + 15
         if scenario_id in {"youtube", "youtube-unlock"}:
+            scenario_deadline = min(
+                self.deadline_seconds,
+                int(SCENARIO_DEFINITIONS[scenario_id]["deadline_seconds"]),
+            )
             command = [
                 "cfwarp-service-eval",
                 scenario_id,
                 *common,
                 "--deadline-seconds",
-                str(self.deadline_seconds),
+                str(scenario_deadline),
             ]
+            subprocess_deadline = scenario_deadline
         elif scenario_id == "perf":
             command = [
                 "cfwarp-service-eval",
@@ -159,7 +165,7 @@ class ProbeRunner:
             ]
             if self.browser_execution == "agentcore":
                 command += ["--browser-provider", "agentcore"]
-        await self._run(command, self.deadline_seconds + 15, check=False)
+        await self._run(command, subprocess_deadline, check=False)
         enforce_artifact_limit(
             output,
             int(SCENARIO_DEFINITIONS[scenario_id]["artifact_limit_bytes"]),

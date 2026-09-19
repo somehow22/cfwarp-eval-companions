@@ -1,12 +1,16 @@
+import sys
 import time
 from pathlib import Path
 
 import pytest
 from yt_dlp.utils import DownloadError
 
+from cfwarp_service_eval.youtube import CapturedLogger
 from cfwarp_service_eval.youtube_unlock import (
     FIXED_VIDEO_ID,
+    FIXED_VIDEO_URL,
     YouTubeUnlockConfig,
+    extract_unlock_video,
     run_probe,
     select_format_reference,
 )
@@ -31,7 +35,7 @@ def ready(monkeypatch):
         "cfwarp_service_eval.youtube_unlock.command_identity",
         lambda command: {
             "path": "/usr/bin/deno" if command == "deno" else None,
-            "version": "2.9.2" if command == "deno" else None,
+            "version": "deno 2.9.2" if command == "deno" else None,
         },
     )
     monkeypatch.setattr(
@@ -67,7 +71,7 @@ def test_unlock_pass_requires_metadata_and_sanitized_format_reference(
     tmp_path: Path, monkeypatch, ready
 ) -> None:
     monkeypatch.setattr(
-        "cfwarp_service_eval.youtube_unlock.extract_video",
+        "cfwarp_service_eval.youtube_unlock.extract_unlock_video",
         lambda *_args: extracted_info(),
     )
 
@@ -105,13 +109,13 @@ def test_unlock_classifies_terminal_service_failures_without_retry(
 ) -> None:
     calls = 0
 
-    def fail(_config, _url, logger):
+    def fail(_config, logger):
         nonlocal calls
         calls += 1
         logger.error(message)
         raise DownloadError("extraction failed")
 
-    monkeypatch.setattr("cfwarp_service_eval.youtube_unlock.extract_video", fail)
+    monkeypatch.setattr("cfwarp_service_eval.youtube_unlock.extract_unlock_video", fail)
 
     summary, exit_code = run_probe(config(tmp_path))
 
@@ -134,7 +138,7 @@ def test_unlock_rejects_unexpected_metadata(
     tmp_path: Path, monkeypatch, ready, override
 ) -> None:
     monkeypatch.setattr(
-        "cfwarp_service_eval.youtube_unlock.extract_video",
+        "cfwarp_service_eval.youtube_unlock.extract_unlock_video",
         lambda *_args: extracted_info(**override),
     )
 
@@ -153,6 +157,100 @@ def test_unlock_rejects_metadata_without_usable_format() -> None:
     assert select_format_reference({"formats": [{"format_id": "storyboard"}]}) is None
 
 
+@pytest.mark.parametrize(
+    "format_values",
+    [
+        {"url": "https://media.example/video", "protocol": "https"},
+        {
+            "url": "ftp://media.example/video",
+            "protocol": "https",
+            "vcodec": "avc1",
+        },
+        {
+            "url": "https:///missing-host",
+            "protocol": "https",
+            "vcodec": "avc1",
+        },
+        {
+            "url": "https://media.example/video",
+            "protocol": "https",
+            "vcodec": "avc1",
+            "has_drm": True,
+        },
+        {
+            "url": "https://media.example/video",
+            "protocol": "https",
+            "acodec": "opus",
+            "drm_family": "widevine",
+        },
+        {
+            "url": "https://media.example/video",
+            "protocol": "https",
+            "vcodec": "avc1",
+            "format_note": "DRM protected",
+        },
+    ],
+)
+def test_unlock_rejects_missing_codec_invalid_url_and_drm_formats(
+    format_values,
+) -> None:
+    assert (
+        select_format_reference(
+            {"formats": [{"format_id": "candidate", **format_values}]}
+        )
+        is None
+    )
+
+
+def test_unlock_real_yt_dlp_seam_disables_format_checks_and_downloads(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            calls["options"] = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def extract_info(self, url, *, download):
+            calls["extract_info"] = (url, download)
+            return {"id": FIXED_VIDEO_ID, "title": "test", "formats": []}
+
+        def sanitize_info(self, info):
+            calls["sanitized"] = info
+            return info
+
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.yt_dlp.YoutubeDL", FakeYoutubeDL
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.shutil.which",
+        lambda command: "/usr/bin/deno" if command == "deno" else None,
+    )
+
+    metadata, _ = extract_unlock_video(
+        config(tmp_path),
+        CapturedLogger(),
+    )
+
+    options = calls["options"]
+    assert isinstance(options, dict)
+    assert options["check_formats"] is False
+    assert options["skip_download"] is True
+    assert options["cachedir"] is False
+    assert options["remote_components"] == []
+    assert options["js_runtimes"] == {"deno": {"path": "/usr/bin/deno"}}
+    assert options["cookiefile"] is None
+    assert options["cookiesfrombrowser"] is None
+    assert calls["extract_info"] == (FIXED_VIDEO_URL, False)
+    assert metadata["id"] == FIXED_VIDEO_ID
+
+
 def test_unlock_reports_missing_javascript_runtime_as_tooling_failure(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -165,7 +263,7 @@ def test_unlock_reports_missing_javascript_runtime_as_tooling_failure(
         lambda _config: ({"ok": True, "warp": "on", "location": "US"}, True),
     )
     monkeypatch.setattr(
-        "cfwarp_service_eval.youtube_unlock.extract_video",
+        "cfwarp_service_eval.youtube_unlock.extract_unlock_video",
         lambda *_args: (_ for _ in ()).throw(AssertionError("must not extract")),
     )
 
@@ -174,6 +272,36 @@ def test_unlock_reports_missing_javascript_runtime_as_tooling_failure(
     assert exit_code == 2
     assert summary["verdict"] == "tooling_failure"
     assert summary["observation"]["result"]["availability"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("ejs_version", "deno_version"),
+    [("0.7.0", "deno 2.9.2"), ("0.8.0", "deno 2.9.7")],
+)
+def test_unlock_requires_exact_solver_and_runtime_versions(
+    tmp_path: Path, monkeypatch, ejs_version: str, deno_version: str
+) -> None:
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.importlib.metadata.version",
+        lambda package: ejs_version if package == "yt-dlp-ejs" else "2026.7.4",
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.command_identity",
+        lambda _command: {"path": "/usr/bin/deno", "version": deno_version},
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.check_trace",
+        lambda _config: ({"ok": True, "warp": "on", "location": "US"}, True),
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.extract_unlock_video",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not extract")),
+    )
+
+    summary, exit_code = run_probe(config(tmp_path))
+
+    assert exit_code == 2
+    assert summary["verdict"] == "tooling_failure"
 
 
 def test_unlock_has_whole_probe_deadline(tmp_path: Path, monkeypatch) -> None:
@@ -187,3 +315,15 @@ def test_unlock_has_whole_probe_deadline(tmp_path: Path, monkeypatch) -> None:
     assert exit_code == 2
     assert summary["verdict"] == "probe_deadline_exceeded"
     assert summary["observation"]["result"]["eligible"] is False
+
+
+def test_unlock_cli_rejects_deadline_beyond_catalog_budget(monkeypatch) -> None:
+    from cfwarp_service_eval.cli import main
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cfwarp-service-eval", "youtube-unlock", "--deadline-seconds", "121"],
+    )
+    with pytest.raises(SystemExit, match="must be at most 120"):
+        main()

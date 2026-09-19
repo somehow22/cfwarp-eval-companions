@@ -4,13 +4,17 @@ import importlib.metadata
 import json
 import platform
 import signal
+import shutil
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+import yt_dlp
 from yt_dlp.utils import DownloadError
 
 from .classify import classify_failure
@@ -20,14 +24,16 @@ from .youtube import (
     ProbeDeadlineExceeded,
     check_trace,
     command_identity,
-    extract_video,
     redact_proxy,
     redact_text,
+    ydl_options,
 )
 
 
 FIXED_VIDEO_ID = "BaW_jenozKc"
 FIXED_VIDEO_URL = f"https://www.youtube.com/watch?v={FIXED_VIDEO_ID}"
+PINNED_DENO_VERSION = "2.9.2"
+PINNED_EJS_VERSION = "0.8.0"
 IN_FLIGHT: dict[str, Any] = {}
 
 
@@ -50,13 +56,29 @@ class YouTubeUnlockConfig:
 
 
 def select_format_reference(info: dict[str, Any]) -> dict[str, Any] | None:
+    def usable(item: dict[str, Any]) -> bool:
+        url = item.get("url")
+        if not isinstance(url, str):
+            return False
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return False
+        if item.get("protocol") not in {"http", "https"}:
+            return False
+        if item.get("has_drm") is True or item.get("drm_family"):
+            return False
+        if "drm" in str(item.get("format_note") or "").casefold():
+            return False
+        codecs = (item.get("vcodec"), item.get("acodec"))
+        return any(
+            isinstance(codec, str) and codec.strip() and codec.casefold() != "none"
+            for codec in codecs
+        )
+
     candidates = [
         item
         for item in info.get("formats") or []
-        if item.get("format_id")
-        and item.get("url")
-        and item.get("protocol") in {"http", "https"}
-        and (item.get("vcodec") != "none" or item.get("acodec") != "none")
+        if item.get("format_id") and usable(item)
     ]
     if not candidates:
         return None
@@ -65,6 +87,42 @@ def select_format_reference(info: dict[str, Any]) -> dict[str, Any] | None:
         key: selected.get(key)
         for key in ("format_id", "protocol", "ext", "vcodec", "acodec")
     }
+
+
+def youtube_unlock_options(
+    config: YouTubeUnlockConfig, logger: CapturedLogger
+) -> dict[str, Any]:
+    options = ydl_options(config, logger)  # type: ignore[arg-type]
+    deno_path = shutil.which("deno")
+    return options | {
+        "check_formats": False,
+        "skip_download": True,
+        "cachedir": False,
+        "remote_components": [],
+        "js_runtimes": {"deno": {"path": deno_path}} if deno_path else {},
+    }
+
+
+def extract_unlock_video(
+    config: YouTubeUnlockConfig, logger: CapturedLogger
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    started = time.monotonic()
+    with yt_dlp.YoutubeDL(youtube_unlock_options(config, logger)) as ydl:
+        info = ydl.extract_info(FIXED_VIDEO_URL, download=False)
+        sanitized = ydl.sanitize_info(info)
+    formats = sanitized.get("formats") or []
+    metadata = {
+        "id": sanitized.get("id"),
+        "title": sanitized.get("title"),
+        "webpage_url": sanitized.get("webpage_url"),
+        "duration": sanitized.get("duration"),
+        "availability": sanitized.get("availability"),
+        "age_limit": sanitized.get("age_limit"),
+        "live_status": sanitized.get("live_status"),
+        "format_count": len(formats),
+        "elapsed_ms": round((time.monotonic() - started) * 1_000),
+    }
+    return metadata, sanitized
 
 
 def validate_unlock(
@@ -119,9 +177,7 @@ def _run_probe(config: YouTubeUnlockConfig) -> tuple[dict[str, Any], int]:
         "python": {"version": platform.python_version()},
         "yt_dlp": {"version": importlib.metadata.version("yt-dlp")},
         "yt_dlp_ejs": {"version": importlib.metadata.version("yt-dlp-ejs")},
-        "javascript_runtimes": {
-            name: command_identity(name) for name in ("deno", "node", "bun", "qjs")
-        },
+        "deno": command_identity("deno"),
     }
     summary = initial_summary(config, started_at.isoformat(), tools)
     IN_FLIGHT["summary"] = summary
@@ -135,7 +191,11 @@ def _run_probe(config: YouTubeUnlockConfig) -> tuple[dict[str, Any], int]:
         )
         return finish(config.output, summary), 2
 
-    if not any(item["path"] for item in tools["javascript_runtimes"].values()):
+    if (
+        tools["yt_dlp_ejs"]["version"] != PINNED_EJS_VERSION
+        or not tools["deno"]["path"]
+        or tools["deno"]["version"] != f"deno {PINNED_DENO_VERSION}"
+    ):
         summary["verdict"] = "tooling_failure"
         summary["failure_layer"] = "tooling"
         return finish(config.output, summary), 2
@@ -144,7 +204,7 @@ def _run_probe(config: YouTubeUnlockConfig) -> tuple[dict[str, Any], int]:
         logger = CapturedLogger()
         attempt: dict[str, Any] = {"number": number}
         try:
-            metadata, info = extract_video(config, FIXED_VIDEO_URL, logger)  # type: ignore[arg-type]
+            metadata, info = extract_unlock_video(config, logger)
             attempt["metadata"] = metadata
             logged_outcome = classify_failure(
                 "\n".join(logger.warnings + logger.errors)

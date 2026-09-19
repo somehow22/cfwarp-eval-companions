@@ -122,6 +122,8 @@ def main() -> int:
     if args.deadline_seconds <= 0 or args.deadline_seconds > 600:
         raise SystemExit("--deadline-seconds must be greater than 0 and at most 600")
     if args.service == "youtube-unlock":
+        if args.deadline_seconds > 120:
+            raise SystemExit("youtube-unlock --deadline-seconds must be at most 120")
         config = YouTubeUnlockConfig(
             proxy=args.proxy,
             output=args.output or default_output("youtube-unlock"),

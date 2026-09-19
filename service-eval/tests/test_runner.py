@@ -3,6 +3,7 @@ import sys
 
 import pytest
 
+from cfwarp_service_eval.config import Lane
 from cfwarp_service_eval.runner import (
     ProbeError,
     ProbeRunner,
@@ -49,3 +50,33 @@ def test_artifact_limit_fails_closed(tmp_path):
     enforce_artifact_limit(output, 32)
     with pytest.raises(ProbeError, match="exceed contract limit"):
         enforce_artifact_limit(output, 31)
+
+
+def test_scheduled_youtube_unlock_is_capped_at_catalog_deadline(tmp_path):
+    runner = ProbeRunner(tmp_path, deadline_seconds=180)
+    captured = {}
+
+    async def capture(command, timeout, check=True):
+        captured.update(command=command, timeout=timeout, check=check)
+        return ""
+
+    runner._run = capture
+    lane = Lane(
+        id="test",
+        proxy="socks5h://proxy-host-1:1080",
+        instance_id="test-instance",
+        node_id="proxy-host-1",
+        composition="direct-warp",
+        transport="wireguard",
+        substrate_profile=None,
+        requested_region=None,
+        image_identity="example@sha256:" + "a" * 64,
+        config_digest="sha256:" + "b" * 64,
+    )
+
+    with pytest.raises(ProbeError, match="without a summary"):
+        asyncio.run(runner.run("test-run", lane, "youtube-unlock"))
+
+    assert captured["timeout"] == 120
+    deadline_index = captured["command"].index("--deadline-seconds")
+    assert captured["command"][deadline_index + 1] == "120"
