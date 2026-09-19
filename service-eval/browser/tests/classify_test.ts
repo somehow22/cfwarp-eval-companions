@@ -13,6 +13,7 @@ function observation(overrides: Partial<BrowserObservation> = {}): BrowserObserv
       searchControlCount: 0,
       searchResultCount: 0,
       publicPostCount: 0,
+      publicPostTitlePermalinkCount: 0,
       loginFormCount: 0,
       turnstileWidgetCount: 0,
     },
@@ -41,7 +42,7 @@ Deno.test("classifies supported anonymous entry and listing scenarios", () => {
         bodyText: "Sign in",
         dom: { ...observation().dom, promptControlCount: 1 },
       }),
-      "available_login_required",
+      "available",
       true,
     ],
     [
@@ -59,7 +60,11 @@ Deno.test("classifies supported anonymous entry and listing scenarios", () => {
       observation({
         finalUrl: "https://www.reddit.com/r/popular/",
         title: "Popular posts - Reddit",
-        dom: { ...observation().dom, publicPostCount: 2 },
+        dom: {
+          ...observation().dom,
+          publicPostCount: 2,
+          publicPostTitlePermalinkCount: 2,
+        },
       }),
       "available",
       true,
@@ -104,7 +109,7 @@ Deno.test("challenge and explicit blocks take precedence over branding", () => {
   }
 })
 
-Deno.test("region blocks, login walls, and unknown pages remain non-passing", () => {
+Deno.test("region blocks, login walls, and unexpected pages remain non-passing", () => {
   const region = classify(
     scenarios.gemini,
     observation({ title: "Gemini", bodyText: "Gemini isn't currently supported in your country" }),
@@ -117,7 +122,7 @@ Deno.test("region blocks, login walls, and unknown pages remain non-passing", ()
     scenarios.reddit,
     observation({ finalUrl: "https://www.reddit.com/login/", bodyText: "Log in" }),
   )
-  if (login.verdict !== "auth_required") {
+  if (login.verdict !== "authentication_required") {
     throw new Error(`unexpected Reddit verdict: ${login.verdict}`)
   }
 
@@ -151,6 +156,57 @@ Deno.test("region blocks, login walls, and unknown pages remain non-passing", ()
   )
   if (wrongOrigin.verdict !== "unknown") {
     throw new Error(`wrong-origin page passed as ${wrongOrigin.verdict}`)
+  }
+})
+
+Deno.test("Gemini account redirect is authentication required, not application entry", () => {
+  const login = classify(
+    scenarios.gemini,
+    observation({
+      finalUrl: "https://accounts.google.com/v3/signin/identifier",
+      title: "Sign in - Google Accounts",
+      bodyText: "Sign in",
+      dom: { ...observation().dom, loginFormCount: 1 },
+    }),
+  )
+  if (login.verdict !== "authentication_required" || login.pass) {
+    throw new Error(`Gemini login redirect passed as ${login.verdict}`)
+  }
+})
+
+Deno.test("Gemini distinguishes bot challenge and rate limit", () => {
+  const challenged = classify(
+    scenarios.gemini,
+    observation({
+      finalUrl: "https://gemini.google.com/app",
+      title: "Gemini",
+      bodyText: "Verify that you are human",
+    }),
+  )
+  if (challenged.verdict !== "bot_challenge" || challenged.pass) {
+    throw new Error(`Gemini bot challenge classified as ${challenged.verdict}`)
+  }
+  const limited = classify(
+    scenarios.gemini,
+    observation({ finalUrl: "https://gemini.google.com/app", httpStatus: 429 }),
+  )
+  if (limited.verdict !== "rate_limited" || limited.pass) {
+    throw new Error(`Gemini rate limit classified as ${limited.verdict}`)
+  }
+})
+
+Deno.test("Reddit requires a public post title paired with a permalink", () => {
+  const shell = classify(
+    scenarios.reddit,
+    observation({
+      finalUrl: "https://www.reddit.com/r/popular/",
+      title: "Popular posts - Reddit",
+      bodyText: "Popular on Reddit",
+      dom: { ...observation().dom, publicPostCount: 4 },
+    }),
+  )
+  if (shell.verdict !== "unexpected_content" || shell.pass) {
+    throw new Error(`Reddit shell passed as ${shell.verdict}`)
   }
 })
 

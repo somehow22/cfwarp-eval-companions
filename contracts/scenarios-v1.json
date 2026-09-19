@@ -15,9 +15,22 @@
       "remediation_role": "gate"
     },
     {
+      "id": "youtube-unlock",
+      "scenario_id": "youtube.anonymous_public_video_unlock",
+      "version": "1",
+      "execution_class": "lightweight",
+      "runner": "python:youtube-unlock",
+      "runtime_prerequisites": {"commands": ["curl", "deno"], "network": true, "anonymous": true, "cookies": false},
+      "minimum_memory_mib": null,
+      "deadline_seconds": 120,
+      "freshness_seconds": 86400,
+      "artifact_limit_bytes": 2097152,
+      "remediation_role": "gate"
+    },
+    {
       "id": "gemini",
       "scenario_id": "gemini.anonymous_entry",
-      "version": "1",
+      "version": "2",
       "execution_class": "browser",
       "runner": "deno:gemini",
       "runtime_prerequisites": {"commands": ["deno", "agent-browser"], "browser_execution": ["local", "agentcore"], "minimum_memory_mib_local": 768, "network": true},
@@ -56,7 +69,7 @@
     {
       "id": "reddit",
       "scenario_id": "reddit.anonymous_public_listing",
-      "version": "1",
+      "version": "2",
       "execution_class": "browser",
       "runner": "deno:reddit",
       "runtime_prerequisites": {"commands": ["deno", "agent-browser"], "browser_execution": ["local", "agentcore"], "minimum_memory_mib_local": 768, "network": true},

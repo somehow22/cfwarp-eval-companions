@@ -60,7 +60,7 @@ deno task probe \
 ```
 
 `challenge_reference_rendered` is a passing **Turnstile reference-scenario** result. It remains
-distinct from the non-passing `challenge` result returned when an ordinary service scenario is
+distinct from the non-passing challenge result returned when an ordinary service scenario is
 interrupted by a challenge.
 
 ## Verdict contract
@@ -69,9 +69,9 @@ Every run first opens Cloudflare trace in the same fresh browser session and req
 listener-facing `warp=on`. It then records a service-specific result:
 
 - `available` or `available_login_required`: scenario passed;
-- `challenge`, `blocked`, `unavailable`, `auth_required`, or `service_unavailable`: page was
-  classified but the scenario failed;
-- `unknown`: evidence was insufficient, so the scenario is not promoted;
+- `challenge`, `bot_challenge`, `rate_limited`, `blocked`, `unavailable`, `auth_required`,
+  `authentication_required`, or `service_unavailable`: page was classified but the scenario failed;
+- `unexpected_content` or `unknown`: evidence was insufficient, so the scenario is not promoted;
 - `challenge_reference_rendered`: the Turnstile reference rendered its expected challenge evidence;
   this is not an ordinary service-availability result;
 - `tunnel_failure`, `tooling_failure`, or `probe_deadline_exceeded`: evaluation did not reach a
@@ -104,3 +104,29 @@ are removed from structured evidence. The wrapper forces a tracked clean browser
 environment allowlist so ambient profiles, auth state, proxy variables, extensions, and browser
 flags cannot contaminate the anonymous session. Authenticated account testing is outside this
 scenario pack.
+
+## Gemini and Reddit capability semantics
+
+`gemini.anonymous_entry` version `2` has definition digest
+`sha256:a836627f65e5b7e105a303c29a6ded52c31728b2fdbdf645c2e49bb72cde8174`. A pass requires the
+Gemini application URL plus an application prompt control in a clean anonymous session and no
+geo/access denial. A redirect to generic Google account login is `authentication_required`; it does
+not prove Gemini is usable, and this evaluator never submits a prompt or authenticates.
+
+`reddit.anonymous_public_listing` version `2` has definition digest
+`sha256:268ef4adfc187b9f671a0be9f83c4322666c63a4186a682c211f31ff22468d53`. A pass requires
+`/r/popular/` and at least one rendered public post whose title is paired with a Reddit comments
+permalink. HTTP 200, Reddit branding, an app shell, or a login page is insufficient.
+
+Both scenarios use agent-browser 0.31.2 with Deno 2.9.2, a fresh profile, no credential/profile
+environment, a 45-second command timeout, a 120-second default whole-probe deadline, at most one
+fresh-session replay for browser command failure, and the catalog's 2 MiB artifact limit. The
+catalog ceiling for scheduled Gemini and Reddit evaluations is 300 seconds; the worker may supply a
+lower whole-probe deadline. Deterministic tests cover success, geo denial, login requirement, bot
+challenge, rate limit, tool/deadline failure, and unexpected content without using live accounts.
+
+Immutable publication requires a digest-pinned evaluator image containing the tested Deno,
+agent-browser, and managed Chromium versions; a non-development `CFWARP_EVALUATOR_BUILD`; exact
+Observation v2 scenario provenance; and a reviewed lane descriptor whose instance, config
+generation/digest, listener, and browser execution target match the observation. Browser screenshots
+remain optional evidence and never replace these DOM-based verdict conditions.

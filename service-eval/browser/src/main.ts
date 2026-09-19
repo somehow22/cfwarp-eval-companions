@@ -407,7 +407,7 @@ export function buildObservation(summary: Summary): Observation {
     scenario_id: `${summary.service}.${summary.scenario}`,
     probe: {
       name: "browser-scenario",
-      version: "1",
+      version: scenarios[summary.service].version,
       execution: typeof input.browser_provider === "string" ? input.browser_provider : "local",
     },
     subject: {

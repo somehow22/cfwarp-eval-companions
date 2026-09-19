@@ -7,6 +7,8 @@ from pathlib import Path
 from .perf import PerfConfig
 from .perf import run_probe as run_perf_probe
 from .youtube import DEFAULT_SOURCE_URL, YouTubeConfig, run_probe
+from .youtube_unlock import YouTubeUnlockConfig
+from .youtube_unlock import run_probe as run_youtube_unlock_probe
 
 
 PROVENANCE = (
@@ -47,6 +49,18 @@ def parser() -> argparse.ArgumentParser:
     youtube.add_argument("--transfer-bytes", type=int, default=262_144)
     for flag in PROVENANCE:
         youtube.add_argument(flag)
+
+    youtube_unlock = subcommands.add_parser(
+        "youtube-unlock",
+        help="evaluate fixed-video anonymous metadata and format access without media download",
+    )
+    youtube_unlock.add_argument("--proxy")
+    youtube_unlock.add_argument("--output", type=Path)
+    youtube_unlock.add_argument("--attempts", type=int, default=2, choices=range(1, 3))
+    youtube_unlock.add_argument("--timeout-seconds", type=float, default=25.0)
+    youtube_unlock.add_argument("--deadline-seconds", type=float, default=120.0)
+    for flag in PROVENANCE:
+        youtube_unlock.add_argument(flag)
 
     perf = subcommands.add_parser(
         "perf", help="sample bounded lane throughput as a routine observation"
@@ -107,6 +121,26 @@ def main() -> int:
         raise SystemExit("--timeout-seconds must be greater than 0 and at most 120")
     if args.deadline_seconds <= 0 or args.deadline_seconds > 600:
         raise SystemExit("--deadline-seconds must be greater than 0 and at most 600")
+    if args.service == "youtube-unlock":
+        config = YouTubeUnlockConfig(
+            proxy=args.proxy,
+            output=args.output or default_output("youtube-unlock"),
+            attempts=args.attempts,
+            timeout_seconds=args.timeout_seconds,
+            instance_id=args.instance_id,
+            image_identity=args.image_identity,
+            config_digest=args.config_digest,
+            deadline_seconds=args.deadline_seconds,
+            node_id=args.node_id,
+            runtime=args.runtime,
+            composition=args.composition,
+            transport=args.transport,
+            substrate_profile=args.substrate_profile,
+            requested_region=args.requested_region,
+        )
+        _, exit_code = run_youtube_unlock_probe(config)
+        print((config.output / "verdict.txt").read_text(encoding="utf-8"), end="")
+        return exit_code
     if args.transfer_bytes < 1 or args.transfer_bytes > 4 * 1024 * 1024:
         raise SystemExit("--transfer-bytes must be between 1 and 4194304")
     config = YouTubeConfig(

@@ -23,7 +23,7 @@ _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        "auth_required",
+        "authentication_required",
         (
             r"sign in to confirm your age",
             r"this video may be inappropriate for some users",
@@ -31,6 +31,15 @@ _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             r"private video",
             r"login required",
             r"authentication required",
+        ),
+    ),
+    (
+        "rate_limited",
+        (
+            r"too many requests",
+            r"http error 429",
+            r"status code 429",
+            r"rate.?limit",
         ),
     ),
     (

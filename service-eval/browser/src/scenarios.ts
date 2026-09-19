@@ -13,6 +13,7 @@ export interface Signal {
 export interface Scenario {
   service: ServiceName
   scenario: string
+  version: string
   url: string
   allowedDomains: string[]
   acceptedLocations: Array<{ hostname: string; pathPattern: RegExp }>
@@ -46,6 +47,7 @@ export const scenarios: Record<ServiceName, Scenario> = {
   chatgpt: {
     service: "chatgpt",
     scenario: "anonymous_entry",
+    version: "1",
     url: "https://chatgpt.com/",
     allowedDomains: [
       "chatgpt.com",
@@ -75,6 +77,7 @@ export const scenarios: Record<ServiceName, Scenario> = {
   gemini: {
     service: "gemini",
     scenario: "anonymous_entry",
+    version: "2",
     url: "https://gemini.google.com/app?hl=en",
     allowedDomains: ["google.com", "*.google.com", "gstatic.com", "*.gstatic.com"],
     acceptedLocations: [
@@ -84,7 +87,7 @@ export const scenarios: Record<ServiceName, Scenario> = {
     requiredDom: "prompt_control",
     proxyBypass: "",
     fixture: null,
-    loginWallIsAvailable: true,
+    loginWallIsAvailable: false,
     positiveSignals: [
       { name: "gemini_entry", pattern: /(?:chat with gemini|meet gemini|ask gemini)/i },
     ],
@@ -102,6 +105,7 @@ export const scenarios: Record<ServiceName, Scenario> = {
   "google-search": {
     service: "google-search",
     scenario: "anonymous_search_results",
+    version: "1",
     url: "https://www.google.com/search?q=cfwarp+connectivity+check&hl=en",
     allowedDomains: ["google.com", "*.google.com", "gstatic.com", "*.gstatic.com"],
     acceptedLocations: [{ hostname: "www.google.com", pathPattern: /^\/search$/ }],
@@ -123,6 +127,7 @@ export const scenarios: Record<ServiceName, Scenario> = {
   reddit: {
     service: "reddit",
     scenario: "anonymous_public_listing",
+    version: "2",
     url: "https://www.reddit.com/r/popular/",
     allowedDomains: ["reddit.com", "*.reddit.com", "redditstatic.com", "*.redditstatic.com"],
     acceptedLocations: [{ hostname: "www.reddit.com", pathPattern: /^\/r\/popular(?:\/|$)/ }],
@@ -145,6 +150,7 @@ export const scenarios: Record<ServiceName, Scenario> = {
   "turnstile-reference": {
     service: "turnstile-reference",
     scenario: "interactive_test_widget_render",
+    version: "1",
     url: "",
     allowedDomains: ["127.0.0.1", "challenges.cloudflare.com"],
     acceptedLocations: [{ hostname: "127.0.0.1", pathPattern: /^\/turnstile-interactive$/ }],

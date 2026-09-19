@@ -10,6 +10,7 @@ from cfwarp_service_eval.youtube import (
     CapturedLogger,
     YouTubeConfig,
     canonical_video_url,
+    classify_legacy_failure,
     parse_trace,
     redact_proxy,
     redact_text,
@@ -106,6 +107,19 @@ def test_direct_yt_dlp_configuration_disables_environment_proxy(tmp_path: Path) 
     direct = config(tmp_path)
     direct = YouTubeConfig(**{**direct.__dict__, "proxy": None})
     assert ydl_options(direct, CapturedLogger())["proxy"] == ""
+
+
+def test_yt_dlp_configuration_is_anonymous_and_enables_maintained_ejs(
+    tmp_path: Path,
+) -> None:
+    options = ydl_options(config(tmp_path), CapturedLogger())
+    assert options["cookiefile"] is None
+    assert options["cookiesfrombrowser"] is None
+    assert options["remote_components"] == ["ejs:npm"]
+
+
+def test_historical_transfer_scenario_keeps_auth_required_class() -> None:
+    assert classify_legacy_failure("Login required") == "auth_required"
 
 
 def test_probe_stops_before_service_when_trace_is_not_warp(

@@ -10,8 +10,10 @@
     "blocked": {"availability": "unavailable", "eligible": true},
     "unavailable": {"availability": "unavailable", "eligible": true},
     "auth_required": {"availability": "unavailable", "eligible": true},
+    "authentication_required": {"availability": "unavailable", "eligible": true},
     "service_unavailable": {"availability": "unavailable", "eligible": true},
     "bot_challenge": {"availability": "unavailable", "eligible": true},
+    "rate_limited": {"availability": "unavailable", "eligible": true},
     "consent_challenge": {"availability": "unavailable", "eligible": true},
     "network_failure": {"availability": "unavailable", "eligible": true},
     "media_transfer_failure": {"availability": "unavailable", "eligible": true},
@@ -22,6 +24,7 @@
     "tooling_or_network_failure": {"availability": "unknown", "eligible": false},
     "probe_deadline_exceeded": {"availability": "unknown", "eligible": false},
     "extractor_failure": {"availability": "unknown", "eligible": false},
+    "unexpected_content": {"availability": "unknown", "eligible": false},
     "unknown": {"availability": "unknown", "eligible": false}
   }
 }

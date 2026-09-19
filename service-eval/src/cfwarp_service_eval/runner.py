@@ -120,10 +120,10 @@ class ProbeRunner:
             common += ["--substrate-profile", lane.substrate_profile]
         if lane.requested_region:
             common += ["--requested-region", lane.requested_region]
-        if scenario_id == "youtube":
+        if scenario_id in {"youtube", "youtube-unlock"}:
             command = [
                 "cfwarp-service-eval",
-                "youtube",
+                scenario_id,
                 *common,
                 "--deadline-seconds",
                 str(self.deadline_seconds),

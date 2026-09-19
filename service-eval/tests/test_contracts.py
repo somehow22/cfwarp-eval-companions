@@ -8,7 +8,7 @@ from cfwarp_service_eval.contracts import (
     contracts_root,
     scenario_definitions,
 )
-from cfwarp_service_eval.provenance import observation_v2
+from cfwarp_service_eval.provenance import observation_v2, scenario_provenance
 
 
 def test_contract_fixtures_and_classifications_are_conformant():
@@ -32,9 +32,22 @@ def test_contract_fixtures_and_classifications_are_conformant():
 
 def test_scenario_catalog_is_unique_and_bounded():
     definitions = scenario_definitions()
-    assert len(definitions) == 7
-    assert len({item["scenario_id"] for item in definitions.values()}) == 7
+    assert len(definitions) == 8
+    assert len({item["scenario_id"] for item in definitions.values()}) == 8
+    assert (
+        definitions["youtube"]["scenario_id"]
+        != definitions["youtube-unlock"]["scenario_id"]
+    )
     assert definitions["perf"]["remediation_role"] == "observe_only"
+    assert scenario_provenance("youtube-unlock")["definition_digest"] == (
+        "sha256:eee07d148db7c8f2ee0d291609b751b3fad1bc0ce7016bfc3f2e6bf59bc56860"
+    )
+    assert scenario_provenance("gemini")["definition_digest"] == (
+        "sha256:a836627f65e5b7e105a303c29a6ded52c31728b2fdbdf645c2e49bb72cde8174"
+    )
+    assert scenario_provenance("reddit")["definition_digest"] == (
+        "sha256:268ef4adfc187b9f671a0be9f83c4322666c63a4186a682c211f31ff22468d53"
+    )
     for definition in definitions.values():
         assert definition["runtime_prerequisites"]["network"] is True
         assert definition["runtime_prerequisites"]["commands"]

@@ -11,6 +11,7 @@ export interface BrowserObservation {
     searchControlCount: number
     searchResultCount: number
     publicPostCount: number
+    publicPostTitlePermalinkCount: number
     loginFormCount: number
     turnstileWidgetCount: number
   }
@@ -21,11 +22,15 @@ export interface Classification {
     | "available"
     | "available_login_required"
     | "challenge"
+    | "bot_challenge"
+    | "rate_limited"
     | "blocked"
     | "unavailable"
     | "auth_required"
+    | "authentication_required"
     | "service_unavailable"
     | "challenge_reference_rendered"
+    | "unexpected_content"
     | "unknown"
   pass: boolean
   failureLayer: "none" | "service-probe"
@@ -79,11 +84,19 @@ export function classify(scenario: Scenario, observation: BrowserObservation): C
       true,
     )
   }
-  if (observation.httpStatus === 429 || challenge.length > 0) {
-    return result("challenge", [
-      ...challenge,
-      ...(observation.httpStatus === 429 ? ["http_429"] : []),
-    ], login)
+  if (observation.httpStatus === 429) {
+    return result(
+      usesCapabilityTaxonomy(scenario) ? "rate_limited" : "challenge",
+      ["http_429"],
+      login,
+    )
+  }
+  if (challenge.length > 0) {
+    return result(
+      usesCapabilityTaxonomy(scenario) ? "bot_challenge" : "challenge",
+      challenge,
+      login,
+    )
   }
 
   const unavailable = matches(scenario.unavailableSignals, evidence)
@@ -118,9 +131,13 @@ export function classify(scenario: Scenario, observation: BrowserObservation): C
     reachable &&
     login.length > 0 &&
     !scenario.loginWallIsAvailable &&
-    (positive.length === 0 || login.includes("login_url"))
+    (login.includes("login_url") || observation.dom.loginFormCount > 0 || !requiredDomPresent)
   ) {
-    return result("auth_required", login, login)
+    return result(
+      usesCapabilityTaxonomy(scenario) ? "authentication_required" : "auth_required",
+      login,
+      login,
+    )
   }
   if (reachable && acceptedLocation && requiredDomPresent) {
     const verdict = login.length > 0 && scenario.loginWallIsAvailable
@@ -128,7 +145,14 @@ export function classify(scenario: Scenario, observation: BrowserObservation): C
       : "available"
     return result(verdict, [...positive, scenario.requiredDom], login, true)
   }
+  if (reachable && acceptedLocation && usesCapabilityTaxonomy(scenario)) {
+    return result("unexpected_content", positive, login)
+  }
   return result("unknown", positive, login)
+}
+
+function usesCapabilityTaxonomy(scenario: Scenario): boolean {
+  return scenario.service === "gemini" || scenario.service === "reddit"
 }
 
 function isAcceptedLocation(scenario: Scenario, value: string): boolean {
@@ -149,7 +173,7 @@ function hasRequiredDom(scenario: Scenario, observation: BrowserObservation): bo
     case "search_results":
       return observation.dom.searchControlCount > 0 && observation.dom.searchResultCount > 0
     case "public_posts":
-      return observation.dom.publicPostCount > 0
+      return observation.dom.publicPostTitlePermalinkCount > 0
     case "turnstile_widget":
       return observation.dom.turnstileWidgetCount > 0
   }

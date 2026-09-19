@@ -128,7 +128,7 @@ class, target, minimum memory, enabled state, and disable reason. This makes a
 small evaluator a valid lightweight probe node rather than a failed browser
 node.
 
-## YouTube gold scenario
+## YouTube transfer scenario
 
 The probe first verifies that the selected listener reports `warp=on`, then
 deterministically selects the first current upload from the configured channel
@@ -163,6 +163,41 @@ passed, but a supported JavaScript runtime was absent or yt-dlp reported a
 JavaScript tooling failure. Keep such a result at experimental confidence until
 the tooling caveat is removed. ffmpeg identity is recorded for reproducibility,
 but ffmpeg is not required by this metadata-plus-bounded-range scenario.
+
+## YouTube unlock scenario
+
+`youtube-unlock` is distinct from the historical media-transfer scenario. Its
+canonical identity is `youtube.anonymous_public_video_unlock`, version `1`,
+with definition digest
+`sha256:eee07d148db7c8f2ee0d291609b751b3fad1bc0ce7016bfc3f2e6bf59bc56860`.
+It pins yt-dlp's public, non-age-restricted test video `BaW_jenozKc`, performs
+anonymous metadata extraction with `download=False`, and requires at least one
+direct HTTP(S) audio or video format reference. The stored reference excludes
+the signed media URL and headers. The probe never downloads media, imports
+browser cookies, or accepts a caller-supplied video URL.
+
+The locked evaluator uses yt-dlp 2026.7.4, yt-dlp-ejs 0.8.0, and yt-dlp's
+maintained `ejs:npm` remote-component mechanism with an available supported
+JavaScript runtime. Per-operation timeout defaults to 25 seconds, the whole
+probe deadline is 120 seconds, there are at most two attempts, and the catalog
+artifact limit is 2 MiB. Only network failures retry; bot challenge,
+authentication requirement, rate limit, geographic/service denial, unexpected
+content, and tooling failure stop immediately.
+
+```bash
+uv run cfwarp-service-eval youtube-unlock \
+  --proxy socks5h://127.0.0.1:1080 \
+  --instance-id direct-wg-01 \
+  --image-identity ghcr.io/example/cfwarp@sha256:example \
+  --config-digest sha256:example
+```
+
+An immutable publication must pin the evaluator image by digest, retain the
+locked Python dependencies and a supported JavaScript runtime, set
+`CFWARP_EVALUATOR_BUILD`, and publish the exact Observation v2 scenario
+provenance generated from the catalog definition. A local success is
+availability evidence only; it is not permission to publish an image or claim
+other lanes or regions.
 
 ## Priority browser scenarios
 

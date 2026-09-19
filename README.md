@@ -143,8 +143,8 @@ The API binds loopback by default. It typically runs with host networking so it
 can reach lane listeners published on `127.0.0.1`, which would otherwise place
 it on a public interface. Widening the bind is an explicit deployment decision.
 
-`perf` and `youtube` are lightweight scenarios and may run in small containers
-or similarly constrained function runtimes. Browser automation is optional.
+`perf`, `youtube`, and `youtube-unlock` are lightweight scenarios and may run
+in small containers or similarly constrained function runtimes. Browser automation is optional.
 Local Chromium must be explicitly enabled and meet the configured memory
 prerequisite; `agentcore` delegates browser execution to an ephemeral cloud
 runtime. `/v1/scenario-capabilities` reports what this evaluator can actually

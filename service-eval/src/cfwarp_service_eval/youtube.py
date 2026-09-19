@@ -232,6 +232,11 @@ def ydl_options(config: YouTubeConfig, logger: CapturedLogger) -> dict[str, Any]
         "cachedir": False,
         "noprogress": True,
         "js_runtimes": js_runtimes,
+        # yt-dlp's maintained EJS challenge solver. This uses the locked
+        # yt-dlp-ejs package and never imports a browser profile or cookies.
+        "remote_components": ["ejs:npm"],
+        "cookiefile": None,
+        "cookiesfrombrowser": None,
     }
 
 
@@ -523,7 +528,7 @@ def _run_probe(config: YouTubeConfig) -> tuple[dict[str, Any], int]:
             attempt["metadata"] = metadata
             if not metadata["id"] or metadata["format_count"] < 1:
                 raise DownloadError("extraction returned no playable formats")
-            logged_outcome = classify_failure(
+            logged_outcome = classify_legacy_failure(
                 "\n".join(logger.warnings + logger.errors)
             )
             if logged_outcome in {
@@ -555,7 +560,7 @@ def _run_probe(config: YouTubeConfig) -> tuple[dict[str, Any], int]:
                 break
         except (DownloadError, OSError, ValueError) as error:
             message = "\n".join(logger.warnings + logger.errors + [str(error)])
-            outcome = classify_failure(message)
+            outcome = classify_legacy_failure(message)
             attempt["warnings"] = logger.warnings
             attempt["errors"] = logger.errors
             attempt["exception"] = redact_text(str(error))[:MAX_LOG_LENGTH]
@@ -580,6 +585,11 @@ def failure_layer(outcome: str) -> str:
     if outcome == "tooling_failure":
         return "tooling"
     return "unknown"
+
+
+def classify_legacy_failure(message: str) -> str:
+    outcome = classify_failure(message)
+    return "auth_required" if outcome == "authentication_required" else outcome
 
 
 def finish(output: Path, summary: dict[str, Any]) -> dict[str, Any]:

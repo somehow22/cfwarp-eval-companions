@@ -648,7 +648,7 @@ def test_browser_capability_is_optional_and_disabled_by_default(tmp_path, monkey
         enabled = {
             row["id"] for row in test_client.get("/v1/scenarios", headers=auth()).json()
         }
-        assert enabled == {"perf", "youtube"}
+        assert enabled == {"perf", "youtube", "youtube-unlock"}
         capabilities = {
             row["id"]: row
             for row in test_client.get(
@@ -670,7 +670,7 @@ def test_local_browser_requires_the_memory_prerequisite(tmp_path, monkeypatch):
         enabled = {
             row["id"] for row in test_client.get("/v1/scenarios", headers=auth()).json()
         }
-        assert enabled == {"perf", "youtube"}
+        assert enabled == {"perf", "youtube", "youtube-unlock"}
         capability = next(
             row
             for row in test_client.get(

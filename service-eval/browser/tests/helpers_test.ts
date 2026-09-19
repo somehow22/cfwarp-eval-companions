@@ -109,11 +109,12 @@ Deno.test("builds the shared freshness-aware observation contract", () => {
     tools: {},
     trace: { ok: true, warp: "on", loc: "US", colo: "LAX", ip: null, httpStatus: 200 },
     browser: null,
-    verdict: "available_login_required",
+    verdict: "available",
     failure_layer: "none",
   }
   const observation = buildObservation(summary)
   if (observation.scenario_id !== "gemini.anonymous_entry") throw new Error("bad scenario ID")
+  if (observation.probe.version !== "2") throw new Error("bad Gemini probe version")
   if (observation.result.availability !== "available" || !observation.result.eligible) {
     throw new Error(`bad result: ${JSON.stringify(observation.result)}`)
   }
