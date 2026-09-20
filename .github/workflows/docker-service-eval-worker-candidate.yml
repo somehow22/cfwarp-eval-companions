@@ -1,4 +1,4 @@
-name: Docker - Service Evaluation Worker Candidate
+name: Docker - ARM64 Observer and Worker Candidate
 
 on:
   workflow_dispatch:
@@ -9,12 +9,22 @@ on:
         type: string
 
 concurrency:
-  group: docker-service-eval-worker-candidate
+  group: docker-service-eval-arm64-candidate
   cancel-in-progress: false
 
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: observer
+            component: observer
+            image: cfwarp-observer
+          - target: worker
+            component: worker
+            image: cfwarp-eval-worker
     permissions:
       contents: read
       packages: write
@@ -37,6 +47,9 @@ jobs:
           git fetch --no-tags origin main:refs/remotes/origin/main
           test "$(git rev-parse origin/main)" = "$SOURCE_REVISION"
 
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -49,7 +62,7 @@ jobs:
           SOURCE_REVISION: ${{ inputs.source_revision }}
         shell: bash
         run: |
-          echo "version=worker-candidate-${SOURCE_REVISION}" >> "$GITHUB_OUTPUT"
+          echo "version=arm64-candidate-${SOURCE_REVISION}" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v7
@@ -57,42 +70,147 @@ jobs:
         with:
           context: .
           file: service-eval/Dockerfile
-          target: worker
-          platforms: linux/amd64
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/cfwarp-eval-worker:candidate-${{ inputs.source_revision }}
+          provenance: false
+          sbom: false
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:arm64-candidate-${{ inputs.source_revision }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ inputs.source_revision }}
-            org.opencontainers.image.version=worker-candidate-${{ inputs.source_revision }}
+            org.opencontainers.image.version=${{ steps.pkg.outputs.version }}
           build-args: |
             VERSION=${{ steps.pkg.outputs.version }}
             COMMIT=${{ inputs.source_revision }}
             BUILD_DATE=${{ steps.pkg.outputs.date }}
-          cache-from: type=gha,scope=service-eval-worker-amd64
-          cache-to: type=gha,mode=max,scope=service-eval-worker-amd64
+          cache-from: type=gha,scope=service-eval-${{ matrix.target }}-multiplatform
+          cache-to: type=gha,mode=max,scope=service-eval-${{ matrix.target }}-multiplatform
 
-      - name: Smoke the published worker artifact
+      - name: Verify raw index and immutable child configs
         env:
-          IMAGE: ghcr.io/${{ github.repository_owner }}/cfwarp-eval-worker@${{ steps.build.outputs.digest }}
+          ARCHIVE: /tmp/${{ matrix.component }}-publication
+          COMPONENT: ${{ matrix.component }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          INDEX_DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
           SOURCE_REVISION: ${{ inputs.source_revision }}
         shell: bash
         run: |
           set -euo pipefail
-          docker pull --platform linux/amd64 "$IMAGE"
-          test "$(docker image inspect "$IMAGE" --format '{{.Architecture}}/{{.Os}}')" = "amd64/linux"
-          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "io.cfwarp.component"}}')" = "worker"
-          test "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_REVISION"
-          test "$(docker image inspect "$IMAGE" --format '{{json .Config.Entrypoint}}')" = '["cfwarp-eval-worker"]'
-          test "$(docker image inspect "$IMAGE" --format '{{.Config.User}}')" = "10001:10001"
-          docker run --rm --platform linux/amd64 --entrypoint /bin/sh "$IMAGE" -ec '
-            test "$(uname -m)" = x86_64
-            test "$(deno --version | sed -n "1p")" = "deno 2.9.2 (stable, release, x86_64-unknown-linux-gnu)"
-            python -c "import importlib.metadata as m; assert m.version(\"yt-dlp\") == \"2026.7.4\"; assert m.version(\"yt-dlp-ejs\") == \"0.8.0\"; import cfwarp_service_eval.worker, cfwarp_service_eval.youtube_unlock"
-          '
+          mkdir -p "$ARCHIVE"
+          docker buildx imagetools inspect --raw "$IMAGE@$INDEX_DIGEST" > "$ARCHIVE/index.json"
+          python service-eval/src/cfwarp_service_eval/oci_publication.py index "$ARCHIVE/index.json" > "$ARCHIVE/children.json"
+          for arch in amd64 arm64; do
+            child_digest="$(jq -r --arg arch "$arch" '.[$arch]' "$ARCHIVE/children.json")"
+            child="$IMAGE@$child_digest"
+            docker pull --platform "linux/$arch" "$child"
+            docker image inspect "$child" | jq '.[0]' > "$ARCHIVE/$arch-config.json"
+            python service-eval/src/cfwarp_service_eval/oci_publication.py image "$ARCHIVE/$arch-config.json" \
+              --architecture "$arch" \
+              --component "$COMPONENT" \
+              --source "$SOURCE" \
+              --revision "$SOURCE_REVISION"
+          done
+
+      - name: Smoke rootless read-only observer images
+        if: matrix.component == 'observer'
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          INDEX_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            docker run --rm --platform "linux/$arch" \
+              --read-only \
+              --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+              --entrypoint python \
+              "$IMAGE@$INDEX_DIGEST" -c \
+              'import os, platform, sqlite3; assert os.getuid() == 10001; assert platform.machine() in {"x86_64", "aarch64"}; sqlite3.connect("/tmp/observer.sqlite3").execute("select 1"); import cfwarp_service_eval.api, cfwarp_service_eval.provenance'
+          done
+
+      - name: Smoke canonical YouTube metadata/formats path
+        if: matrix.component == 'worker'
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          INDEX_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            docker run --rm --platform "linux/$arch" \
+              --read-only \
+              --cap-drop=ALL \
+              --security-opt=no-new-privileges \
+              --tmpfs /tmp:rw,nosuid,nodev,size=128m \
+              --env HOME=/tmp \
+              --entrypoint python \
+              -i "$IMAGE@$INDEX_DIGEST" <<'PY'
+          import importlib.metadata
+          import os
+          import platform
+          from pathlib import Path
+
+          from cfwarp_service_eval.youtube import CapturedLogger, command_identity
+          from cfwarp_service_eval.youtube_unlock import (
+              FIXED_VIDEO_ID,
+              YouTubeUnlockConfig,
+              extract_unlock_video,
+              initial_summary,
+              pinned_deno_identity,
+              pinned_ejs_assets,
+              validate_unlock,
+              youtube_unlock_options,
+          )
+
+          assert os.getuid() == 10001
+          assert platform.machine() in {"x86_64", "aarch64"}
+          assert importlib.metadata.version("yt-dlp") == "2026.7.4"
+          assert importlib.metadata.version("yt-dlp-ejs") == "0.8.0"
+          assert pinned_deno_identity(command_identity("deno"))
+          assert pinned_ejs_assets()
+          config = YouTubeUnlockConfig(
+              proxy=None,
+              output=Path("/tmp/canonical-youtube"),
+              attempts=1,
+              timeout_seconds=30,
+              instance_id="ci",
+              image_identity="ci",
+              config_digest="ci",
+          )
+          logger = CapturedLogger()
+          options = youtube_unlock_options(config, logger)
+          assert options["skip_download"] is True
+          assert options["check_formats"] is False
+          assert options["cachedir"] is False
+          assert options["remote_components"] == []
+          assert initial_summary(config, "2026-01-01T00:00:00+00:00", {})["input"]["media_download"] is False
+          metadata, info = extract_unlock_video(config, logger)
+          assert metadata["id"] == FIXED_VIDEO_ID
+          format_reference, error = validate_unlock(metadata, info)
+          assert error is None
+          assert format_reference and "url" not in format_reference
+          PY
+          done
 
       - uses: actions/attest-build-provenance@v4
+        id: attest
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/cfwarp-eval-worker
+          subject-name: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+      - name: Confirm attestations remain separate from runnable index
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          INDEX_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw "$IMAGE@$INDEX_DIGEST" > /tmp/index-after-attestation.json
+          python service-eval/src/cfwarp_service_eval/oci_publication.py index /tmp/index-after-attestation.json
+          gh attestation verify "oci://$IMAGE@$INDEX_DIGEST" --repo "$GITHUB_REPOSITORY"

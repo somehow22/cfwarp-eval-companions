@@ -208,6 +208,22 @@ provenance generated from the catalog definition. A local success is
 availability evidence only; it is not permission to publish an image or claim
 other videos, playback/streaming, authenticated use, lanes, or regions.
 
+The node-local production path requires both `cfwarp-observer` and
+`cfwarp-eval-worker` on the same architecture. The observer owns scheduling,
+the authenticated lease API, and SQLite; the light worker owns lane heartbeats,
+the pinned yt-dlp/EJS/Deno probe, Observation v1-to-v2 upgrade, and submission
+back to the observer. Run both images rootless with a read-only root filesystem
+and writable tmpfs storage; only the observer state directory is persistent.
+The worker must reach the observer over loopback or a node-private endpoint and
+must reach the lane's node-local proxy listener. Cross-host proxy access and
+amd64 emulation are not production configurations.
+
+The isolated ARM64 candidate workflow publishes commit-qualified tags pointing
+to digest-addressed indexes for only those two components. Each index contains
+exactly one `linux/amd64` and one `linux/arm64` runnable child; provenance
+attestations are separate registry referrers. It does not update release or
+`latest` aliases.
+
 ## Priority browser scenarios
 
 See [`browser/README.md`](browser/README.md) for the bounded ChatGPT, Gemini,
