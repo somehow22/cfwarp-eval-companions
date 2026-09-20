@@ -85,6 +85,19 @@ def test_observation_v2_requires_exact_provenance():
         validator.validate(upgraded)
 
 
+def test_observation_v2_format_checker_rejects_malformed_timestamp():
+    root = contracts_root()
+    schema = json.loads((root / "observation-v2.schema.json").read_text())
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    valid = json.loads((root / "fixtures/observation-valid.json").read_text())
+    valid["schema_version"] = 2
+    valid["scenario_provenance"] = scenario_provenance("youtube")
+    valid["observed_at"] = "not-a-date"
+
+    with pytest.raises(Exception):
+        validator.validate(valid)
+
+
 def test_egress_verdict_report_v1_carries_builds_generations_and_remediation():
     root = contracts_root()
     schema = json.loads((root / "egress-verdict-report-v1.schema.json").read_text())

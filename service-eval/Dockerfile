@@ -54,10 +54,20 @@ ENTRYPOINT ["cfwarp-service-eval-api"]
 
 FROM python-runtime AS worker
 ARG DENO_VERSION
+ARG TARGETARCH
 USER root
 COPY --from=deno /deno /usr/local/bin/deno
-RUN test "$(deno --version | sed -n '1p')" = \
-    "deno ${DENO_VERSION} (stable, release, x86_64-unknown-linux-gnu)"
+ENV DENO_DIR=/opt/deno-cache \
+    DENO_NO_UPDATE_CHECK=1
+RUN case "$TARGETARCH" in \
+      amd64) deno_arch=x86_64 ;; \
+      arm64) deno_arch=aarch64 ;; \
+      *) echo "unsupported worker architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    test "$(deno --version | sed -n '1p')" = \
+      "deno ${DENO_VERSION} (stable, release, ${deno_arch}-unknown-linux-gnu)" && \
+    python -c 'from cfwarp_service_eval.youtube_unlock import pinned_ejs_assets; assert pinned_ejs_assets()' && \
+    install -d -o root -g root -m 0555 "$DENO_DIR"
 USER 10001:10001
 LABEL io.cfwarp.component="worker"
 ENTRYPOINT ["cfwarp-eval-worker"]

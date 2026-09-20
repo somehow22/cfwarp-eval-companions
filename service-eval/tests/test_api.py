@@ -468,6 +468,76 @@ def test_leased_worker_completion_is_idempotent_and_discoverable(tmp_path, monke
         assert 'availability="available"} 1' in metrics
 
 
+def test_youtube_unlock_worker_upgrade_and_sqlite_submission_use_canonical_contract(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SERVICE_EVAL_SCENARIOS", "youtube-unlock")
+    with client(tmp_path, monkeypatch, embedded=False) as test_client:
+        created = test_client.post(
+            "/v1/run-groups",
+            headers=auth(),
+            json={
+                "lane_ids": ["direct-de"],
+                "scenario_ids": ["youtube-unlock"],
+            },
+        )
+        assert created.status_code == 202
+        worker = {
+            "worker_id": "light-arm64-1",
+            "worker_class": "light",
+            "node_id": "proxy-host-1",
+            "evaluator_build": "arm64-test-build",
+            "metadata": {},
+            "lease_seconds": 240,
+        }
+        claimed = test_client.post(
+            "/v2/jobs/claim", headers=auth(), json=worker
+        ).json()["job"]
+        assert claimed["scenario_id"] == "youtube-unlock"
+        now = datetime.now(timezone.utc)
+        raw = {
+            "schema_version": 1,
+            "observation_id": "youtube-unlock-arm64-observation",
+            "observed_at": now.isoformat(),
+            "fresh_until": (now + timedelta(hours=24)).isoformat(),
+            "scenario_id": "youtube.anonymous_public_video_unlock",
+            "probe": {"name": "youtube-unlock-yt-dlp", "version": "1"},
+            "subject": {},
+            "lane": {},
+            "egress": {"warp": "on", "region": "DE", "colo": "FRA"},
+            "result": {
+                "availability": "available",
+                "class": "pass",
+                "eligible": True,
+            },
+            "confidence_stage": "single_observation",
+            "failure_layer": "none",
+            "latency_ms": 10,
+            "artifacts": [],
+        }
+        observation = observation_v2(
+            raw,
+            api.runtime.lanes["direct-de"].public(),
+            "youtube-unlock",
+            "arm64-test-build",
+        )
+        assert observation["scenario_provenance"] == {
+            "catalog": "scenarios-v1",
+            "scenario_id": "youtube.anonymous_public_video_unlock",
+            "definition_digest": "sha256:eee07d148db7c8f2ee0d291609b751b3fad1bc0ce7016bfc3f2e6bf59bc56860",
+        }
+        accepted = test_client.post(
+            f"/v2/jobs/{claimed['task_id']}/complete",
+            headers=auth(),
+            json={
+                "lease_token": claimed["lease_token"],
+                "observation": observation,
+            },
+        )
+        assert accepted.json() == {"disposition": "accepted"}
+        assert api.runtime.store.latest() == [observation]
+
+
 def test_worker_completion_rejects_schema_and_all_claimed_provenance_drift(
     tmp_path, monkeypatch
 ):

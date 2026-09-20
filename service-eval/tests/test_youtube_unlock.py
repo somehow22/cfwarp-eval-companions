@@ -12,6 +12,7 @@ from cfwarp_service_eval.youtube_unlock import (
     YouTubeUnlockConfig,
     extract_unlock_video,
     pinned_deno_identity,
+    pinned_ejs_assets,
     run_probe,
     select_format_reference,
 )
@@ -329,6 +330,41 @@ def test_pinned_deno_identity_accepts_real_pinned_output() -> None:
     }
 
     assert pinned_deno_identity(identity, "x86_64") is True
+
+
+def test_pinned_deno_identity_accepts_real_arm64_output() -> None:
+    identity = {
+        "path": "/usr/bin/deno",
+        "version": "deno 2.9.2 (stable, release, aarch64-unknown-linux-gnu)",
+    }
+
+    assert pinned_deno_identity(identity, "aarch64") is True
+
+
+def test_pinned_ejs_assets_requires_both_packaged_solver_files(monkeypatch) -> None:
+    class Asset:
+        def __init__(self, present: bool):
+            self.present = present
+
+        def is_file(self) -> bool:
+            return self.present
+
+        def read_bytes(self) -> bytes:
+            return b"solver" if self.present else b""
+
+    class Solver:
+        def joinpath(self, name: str) -> Asset:
+            return Asset(name == "core.min.js")
+
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.importlib.resources.files",
+        lambda _package: Solver(),
+    )
+    assert pinned_ejs_assets() is False
+
+
+def test_installed_pinned_ejs_assets_are_complete() -> None:
+    assert pinned_ejs_assets() is True
 
 
 @pytest.mark.parametrize(

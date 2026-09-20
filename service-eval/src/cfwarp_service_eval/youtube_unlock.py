@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import importlib.resources
 import json
 import platform
 import re
@@ -82,6 +83,17 @@ def pinned_deno_identity(
         and match.group("version") == PINNED_DENO_VERSION
         and match.group("target") == expected_target
     )
+
+
+def pinned_ejs_assets() -> bool:
+    try:
+        solver = importlib.resources.files("yt_dlp_ejs.yt.solver")
+        return all(
+            solver.joinpath(name).is_file() and bool(solver.joinpath(name).read_bytes())
+            for name in ("core.min.js", "lib.min.js")
+        )
+    except (ModuleNotFoundError, OSError):
+        return False
 
 
 def select_format_reference(info: dict[str, Any]) -> dict[str, Any] | None:
@@ -224,6 +236,7 @@ def _run_probe(config: YouTubeUnlockConfig) -> tuple[dict[str, Any], int]:
         tools["yt_dlp"]["version"] != PINNED_YT_DLP_VERSION
         or tools["yt_dlp_ejs"]["version"] != PINNED_EJS_VERSION
         or not pinned_deno_identity(tools["deno"])
+        or not pinned_ejs_assets()
     ):
         summary["verdict"] = "tooling_failure"
         summary["failure_layer"] = "tooling"
