@@ -222,7 +222,10 @@ The isolated ARM64 candidate workflow publishes commit-qualified tags pointing
 to digest-addressed indexes for only those two components. Each index contains
 exactly one `linux/amd64` and one `linux/arm64` runnable child; provenance
 attestations are separate registry referrers. It does not update release or
-`latest` aliases.
+`latest` aliases. Its smoke checks are offline artifact certification only:
+they never execute a service scenario or produce Observation/admission
+evidence. Canonical service evaluation runs node-locally on the target host
+through that host's lane listener.
 
 ## Priority browser scenarios
 

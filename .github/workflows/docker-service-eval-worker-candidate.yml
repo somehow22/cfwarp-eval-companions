@@ -123,6 +123,7 @@ jobs:
           set -euo pipefail
           for arch in amd64 arm64; do
             docker run --rm --platform "linux/$arch" \
+              --network=none \
               --read-only \
               --cap-drop=ALL \
               --security-opt=no-new-privileges \
@@ -132,7 +133,7 @@ jobs:
               'import os, platform, sqlite3; assert os.getuid() == 10001; assert platform.machine() in {"x86_64", "aarch64"}; sqlite3.connect("/tmp/observer.sqlite3").execute("select 1"); import cfwarp_service_eval.api, cfwarp_service_eval.provenance'
           done
 
-      - name: Smoke canonical YouTube metadata/formats path
+      - name: Smoke offline worker runtime and canonical probe packaging
         if: matrix.component == 'worker'
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
@@ -142,6 +143,7 @@ jobs:
           set -euo pipefail
           for arch in amd64 arm64; do
             docker run --rm --platform "linux/$arch" \
+              --network=none \
               --read-only \
               --cap-drop=ALL \
               --security-opt=no-new-privileges \
@@ -156,13 +158,10 @@ jobs:
 
           from cfwarp_service_eval.youtube import CapturedLogger, command_identity
           from cfwarp_service_eval.youtube_unlock import (
-              FIXED_VIDEO_ID,
               YouTubeUnlockConfig,
-              extract_unlock_video,
               initial_summary,
               pinned_deno_identity,
               pinned_ejs_assets,
-              validate_unlock,
               youtube_unlock_options,
           )
 
@@ -188,11 +187,6 @@ jobs:
           assert options["cachedir"] is False
           assert options["remote_components"] == []
           assert initial_summary(config, "2026-01-01T00:00:00+00:00", {})["input"]["media_download"] is False
-          metadata, info = extract_unlock_video(config, logger)
-          assert metadata["id"] == FIXED_VIDEO_ID
-          format_reference, error = validate_unlock(metadata, info)
-          assert error is None
-          assert format_reference and "url" not in format_reference
           PY
           done
 

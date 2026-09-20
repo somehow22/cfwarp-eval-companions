@@ -1,4 +1,5 @@
 import copy
+from pathlib import Path
 
 import pytest
 
@@ -103,3 +104,42 @@ def test_image_config_accepts_arm64_worker():
         source=SOURCE,
         revision=REVISION,
     )
+
+
+def assert_offline_candidate_workflow(workflow):
+    forbidden = (
+        "extract_info(",
+        "extract_unlock_video",
+        "FIXED_VIDEO_URL",
+        "run_probe(",
+        "cfwarp-service-eval youtube",
+    )
+
+    assert "Smoke offline worker runtime and canonical probe packaging" in workflow
+    assert workflow.count("--network=none") == 2
+    assert not any(entry in workflow for entry in forbidden)
+
+
+def test_candidate_workflow_certifies_worker_offline_without_service_evaluation():
+    workflow = (
+        Path(__file__).parents[2]
+        / ".github/workflows/docker-service-eval-worker-candidate.yml"
+    ).read_text()
+
+    assert_offline_candidate_workflow(workflow)
+
+
+@pytest.mark.parametrize(
+    "service_call",
+    (
+        "run_probe(config)",
+        "extract_info(FIXED_VIDEO_URL, download=False)",
+    ),
+)
+def test_candidate_workflow_guard_rejects_service_execution(service_call):
+    with pytest.raises(AssertionError):
+        assert_offline_candidate_workflow(
+            "Smoke offline worker runtime and canonical probe packaging\n"
+            "--network=none\n--network=none\n"
+            f"{service_call}\n"
+        )
