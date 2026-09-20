@@ -116,12 +116,13 @@ jobs:
       - name: Smoke rootless read-only observer images
         if: matrix.component == 'observer'
         env:
+          CHILDREN: /tmp/observer-publication/children.json
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
-          INDEX_DIGEST: ${{ steps.build.outputs.digest }}
         shell: bash
         run: |
           set -euo pipefail
           for arch in amd64 arm64; do
+            child_digest="$(jq -r --arg arch "$arch" '.[$arch]' "$CHILDREN")"
             docker run --rm --platform "linux/$arch" \
               --network=none \
               --read-only \
@@ -129,19 +130,20 @@ jobs:
               --security-opt=no-new-privileges \
               --tmpfs /tmp:rw,nosuid,nodev,size=64m \
               --entrypoint python \
-              "$IMAGE@$INDEX_DIGEST" -c \
+              "$IMAGE@$child_digest" -c \
               'import os, platform, sqlite3; assert os.getuid() == 10001; assert platform.machine() in {"x86_64", "aarch64"}; sqlite3.connect("/tmp/observer.sqlite3").execute("select 1"); import cfwarp_service_eval.api, cfwarp_service_eval.provenance'
           done
 
       - name: Smoke offline worker runtime and canonical probe packaging
         if: matrix.component == 'worker'
         env:
+          CHILDREN: /tmp/worker-publication/children.json
           IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
-          INDEX_DIGEST: ${{ steps.build.outputs.digest }}
         shell: bash
         run: |
           set -euo pipefail
           for arch in amd64 arm64; do
+            child_digest="$(jq -r --arg arch "$arch" '.[$arch]' "$CHILDREN")"
             docker run --rm --platform "linux/$arch" \
               --network=none \
               --read-only \
@@ -150,7 +152,7 @@ jobs:
               --tmpfs /tmp:rw,nosuid,nodev,size=128m \
               --env HOME=/tmp \
               --entrypoint python \
-              -i "$IMAGE@$INDEX_DIGEST" <<'PY'
+              -i "$IMAGE@$child_digest" <<'PY'
           import importlib.metadata
           import os
           import platform

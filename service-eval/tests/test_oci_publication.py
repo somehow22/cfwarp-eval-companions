@@ -117,6 +117,9 @@ def assert_offline_candidate_workflow(workflow):
 
     assert "Smoke offline worker runtime and canonical probe packaging" in workflow
     assert workflow.count("--network=none") == 2
+    assert workflow.count('"$IMAGE@$child_digest"') >= 2
+    assert '"$IMAGE@$INDEX_DIGEST" -c' not in workflow
+    assert '-i "$IMAGE@$INDEX_DIGEST"' not in workflow
     assert not any(entry in workflow for entry in forbidden)
 
 
@@ -141,5 +144,6 @@ def test_candidate_workflow_guard_rejects_service_execution(service_call):
         assert_offline_candidate_workflow(
             "Smoke offline worker runtime and canonical probe packaging\n"
             "--network=none\n--network=none\n"
+            '"$IMAGE@$child_digest"\n"$IMAGE@$child_digest"\n'
             f"{service_call}\n"
         )
