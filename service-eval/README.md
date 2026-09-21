@@ -172,14 +172,37 @@ with definition digest
 `sha256:eee07d148db7c8f2ee0d291609b751b3fad1bc0ce7016bfc3f2e6bf59bc56860`.
 It pins yt-dlp's current primary public, non-age-restricted test video
 `YE7VzlLtp-4`, which upstream selected after retiring unavailable fixture
-`BaW_jenozKc`. It performs anonymous metadata extraction with `download=False`
-and requires at least one direct HTTP(S) format reference with an explicit
-audio or video codec. Missing codec metadata, malformed or non-HTTP(S) URLs,
-and DRM-marked references cannot pass. The stored reference excludes the
-signed media URL and headers. The probe sets yt-dlp `check_formats=False`,
+`BaW_jenozKc`. Probe version 2 uses two target-node-local methods. An independent
+HTTP client reads the anonymous watch page, parses its initial player response,
+and requires matching video metadata, `OK` playability, and at least one direct
+HTTP(S) audio/video format. Separately, yt-dlp performs metadata extraction with
+`download=False` and requires at least one direct HTTP(S) format reference with
+an explicit audio or video codec. Missing codec metadata, malformed or
+non-HTTP(S) URLs, and DRM-marked extractor references cannot pass. Stored
+references from both methods exclude signed media URLs and headers. The probe
+sets yt-dlp `check_formats=False`,
 `skip_download=True`, and `download=False`, so it neither preflights nor
 downloads media bytes. It never imports browser cookies or accepts a
 caller-supplied video URL.
+
+Verdict composition is deterministic. Independent watch/player success plus
+yt-dlp success is `pass`. Independent success plus a yt-dlp tool, extractor, or
+service-shaped failure is `pass_with_tooling_caveat`; both are available.
+yt-dlp success without independent success is `probe_dependent`, which is
+unknown and ineligible. An unavailable verdict requires both methods to report
+the same recognized service denial (`bot_challenge`, `consent_challenge`,
+`authentication_required`, `rate_limited`, or `service_unavailable`). Mismatched
+denials, one-sided denials, malformed player data, and transport/tool-only
+failures remain unknown and ineligible. Admission therefore stays fail-closed
+without labeling inconclusive lanes incapable.
+
+The sanitized `youtube-unlock-extractor-regression.json` fixture records a
+non-canonical LAX diagnostic: yt-dlp 2026.06.09 found 29 public formats through
+one production lane where 2026.07.04 reported a bot challenge, while the older
+version still reported a challenge through a legacy lane in the same region and
+colo. This demonstrates both extractor-version and per-egress effects. It is a
+methodology regression fixture only; its different video and one-shot result
+must never be submitted as canonical admission evidence.
 
 The locked evaluator uses yt-dlp 2026.7.4, the installed yt-dlp-ejs 0.8.0
 package, and Deno 2.9.2. Exact tool versions are checked before extraction;
@@ -200,6 +223,16 @@ uv run cfwarp-service-eval youtube-unlock \
   --image-identity ghcr.io/example/cfwarp@sha256:example \
   --config-digest sha256:example
 ```
+
+Observation evidence identifies probe `youtube-unlock-multisignal` version `2`,
+both methods, and the Python, HTTP client, yt-dlp, EJS, and Deno identities. The
+scenario catalog entry is unchanged because it already defines the service
+capability, node-local execution, and bounds rather than a particular extractor
+implementation; its version and definition digest therefore remain compatible.
+Previously stored `youtube-unlock-yt-dlp` version `1` observations retain their
+original meaning and are not rewritten. Consumers that want the corrected
+methodology should require evaluator builds that emit probe version 2 and allow
+old records to expire before making publication or remediation claims.
 
 An immutable publication must pin the evaluator image by digest, retain the
 locked Python dependencies, installed solver package, and exact Deno runtime, set

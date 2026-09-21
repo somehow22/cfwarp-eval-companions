@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
@@ -26,6 +27,7 @@ from .youtube import (
     ProbeDeadlineExceeded,
     check_trace,
     command_identity,
+    httpx_proxy,
     redact_proxy,
     redact_text,
     ydl_options,
@@ -39,6 +41,14 @@ FIXED_VIDEO_URL = f"https://www.youtube.com/watch?v={FIXED_VIDEO_ID}"
 PINNED_DENO_VERSION = "2.9.2"
 PINNED_EJS_VERSION = "0.8.0"
 PINNED_YT_DLP_VERSION = "2026.7.4"
+MAX_WATCH_BYTES = 2 * 1024 * 1024
+SERVICE_FAILURES = {
+    "bot_challenge",
+    "consent_challenge",
+    "authentication_required",
+    "rate_limited",
+    "service_unavailable",
+}
 IN_FLIGHT: dict[str, Any] = {}
 DENO_VERSION_PATTERN = re.compile(
     r"^deno (?P<version>[0-9]+\.[0-9]+\.[0-9]+) "
@@ -183,6 +193,176 @@ def validate_unlock(
     return format_reference, None
 
 
+def player_response_from_watch_page(body: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    for marker in ("ytInitialPlayerResponse =", '"ytInitialPlayerResponse":'):
+        start = body.find(marker)
+        if start < 0:
+            continue
+        candidate = body[start + len(marker) :].lstrip()
+        try:
+            value, _ = decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise ValueError("watch page lacks a valid initial player response")
+
+
+def select_player_format(player: dict[str, Any]) -> dict[str, Any] | None:
+    streaming = player.get("streamingData")
+    if not isinstance(streaming, dict):
+        return None
+    formats = [
+        item
+        for key in ("formats", "adaptiveFormats")
+        for item in streaming.get(key) or []
+        if isinstance(item, dict)
+    ]
+    for item in formats:
+        url = item.get("url")
+        mime_type = item.get("mimeType")
+        if not isinstance(url, str) or not isinstance(mime_type, str):
+            continue
+        parsed = urlsplit(url)
+        media_type = mime_type.split(";", 1)[0].strip().casefold()
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or not media_type.startswith(("audio/", "video/"))
+        ):
+            continue
+        return {
+            "itag": item.get("itag"),
+            "mime_type": mime_type[:300],
+            "content_length_present": bool(item.get("contentLength")),
+        }
+    return None
+
+
+def validate_player_response(player: dict[str, Any]) -> dict[str, Any]:
+    playability = player.get("playabilityStatus")
+    if not isinstance(playability, dict):
+        return {"outcome": "unexpected_content", "content_error": "missing_playability"}
+    if playability.get("status") != "OK":
+        reason = " ".join(
+            str(value)
+            for value in (playability.get("reason"), playability.get("messages"))
+            if value
+        )
+        outcome = classify_failure(reason)
+        return {
+            "outcome": outcome if outcome in SERVICE_FAILURES else "unexpected_content",
+            "playability_status": playability.get("status"),
+        }
+    details = player.get("videoDetails")
+    if not isinstance(details, dict) or details.get("videoId") != FIXED_VIDEO_ID:
+        return {"outcome": "unexpected_content", "content_error": "unexpected_video_id"}
+    title = details.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return {"outcome": "unexpected_content", "content_error": "missing_title"}
+    format_reference = select_player_format(player)
+    if format_reference is None:
+        return {
+            "outcome": "unexpected_content",
+            "content_error": "missing_direct_usable_format",
+        }
+    return {
+        "outcome": "pass",
+        "metadata": {"id": details["videoId"], "title_present": True},
+        "format_reference": format_reference,
+    }
+
+
+def check_watch_player(config: YouTubeUnlockConfig) -> dict[str, Any]:
+    started = time.monotonic()
+    try:
+        with httpx.Client(
+            proxy=httpx_proxy(config.proxy),
+            timeout=config.timeout_seconds,
+            follow_redirects=False,
+            trust_env=False,
+            headers={
+                "Accept-Encoding": "identity",
+                "Accept-Language": "en-US,en;q=0.8",
+                "User-Agent": "cfwarp-service-eval/youtube-unlock-v2",
+            },
+        ) as client:
+            with client.stream("GET", FIXED_VIDEO_URL) as response:
+                body = bytearray()
+                for chunk in response.iter_raw():
+                    if len(chunk) > MAX_WATCH_BYTES - len(body):
+                        return {
+                            "outcome": "unexpected_content",
+                            "content_error": "oversized_watch_page",
+                            "http_status": response.status_code,
+                        }
+                    body.extend(chunk)
+                final_url = str(response.url)
+                status = response.status_code
+                location = response.headers.get("location", "")
+        text = body.decode("utf-8", errors="replace")
+        if 200 <= status < 300:
+            try:
+                player = player_response_from_watch_page(text)
+            except ValueError:
+                classified = classify_failure(text)
+                if classified in SERVICE_FAILURES:
+                    result = {"outcome": classified}
+                else:
+                    raise
+            else:
+                result = validate_player_response(player)
+        else:
+            classified = classify_failure(
+                f"status code {status} {final_url} {location} {text}"
+            )
+            result = {
+                "outcome": (
+                    classified
+                    if classified in SERVICE_FAILURES
+                    else "unexpected_content"
+                ),
+            }
+        if "http_status" not in result:
+            result["http_status"] = status
+        result["elapsed_ms"] = round((time.monotonic() - started) * 1_000)
+        return result
+    except (httpx.HTTPError, OSError) as error:
+        return {
+            "outcome": "network_failure",
+            "error_type": type(error).__name__,
+            "error": redact_text(str(error))[:1_000],
+            "elapsed_ms": round((time.monotonic() - started) * 1_000),
+        }
+    except (json.JSONDecodeError, ValueError) as error:
+        return {
+            "outcome": "unexpected_content",
+            "content_error": str(error)[:300],
+            "elapsed_ms": round((time.monotonic() - started) * 1_000),
+        }
+
+
+def compose_signals(independent: str, extractor: str) -> str:
+    if independent == "pass":
+        return "pass" if extractor == "pass" else "pass_with_tooling_caveat"
+    if independent in SERVICE_FAILURES and independent == extractor:
+        return independent
+    if (
+        extractor == "pass"
+        or independent in SERVICE_FAILURES
+        or extractor in SERVICE_FAILURES
+    ):
+        return "probe_dependent"
+    if independent == "unexpected_content":
+        return "unexpected_content"
+    if independent == "network_failure" or extractor == "network_failure":
+        return "tooling_or_network_failure"
+    if extractor == "tooling_failure":
+        return "tooling_failure"
+    return "extractor_failure"
+
+
 def run_probe(config: YouTubeUnlockConfig) -> tuple[dict[str, Any], int]:
     if (
         not hasattr(signal, "SIGALRM")
@@ -216,6 +396,7 @@ def _run_probe(config: YouTubeUnlockConfig) -> tuple[dict[str, Any], int]:
     started_at = datetime.now(timezone.utc)
     tools = {
         "python": {"version": platform.python_version()},
+        "httpx": {"version": importlib.metadata.version("httpx")},
         "yt_dlp": {"version": importlib.metadata.version("yt-dlp")},
         "yt_dlp_ejs": {"version": importlib.metadata.version("yt-dlp-ejs")},
         "deno": command_identity("deno"),
@@ -232,55 +413,57 @@ def _run_probe(config: YouTubeUnlockConfig) -> tuple[dict[str, Any], int]:
         )
         return finish(config.output, summary), 2
 
-    if (
+    extractor_ready = not (
         tools["yt_dlp"]["version"] != PINNED_YT_DLP_VERSION
         or tools["yt_dlp_ejs"]["version"] != PINNED_EJS_VERSION
         or not pinned_deno_identity(tools["deno"])
         or not pinned_ejs_assets()
-    ):
-        summary["verdict"] = "tooling_failure"
-        summary["failure_layer"] = "tooling"
-        return finish(config.output, summary), 2
+    )
 
     for number in range(1, config.attempts + 1):
         logger = CapturedLogger()
-        attempt: dict[str, Any] = {"number": number}
-        try:
-            metadata, info = extract_unlock_video(config, logger)
-            attempt["metadata"] = metadata
-            logged_outcome = classify_failure(
-                "\n".join(logger.warnings + logger.errors)
-            )
-            if logged_outcome != "extractor_failure":
-                raise DownloadError(f"yt-dlp reported {logged_outcome}")
-            format_reference, content_error = validate_unlock(metadata, info)
-            if content_error:
-                attempt["content_error"] = content_error
-                attempt["warnings"] = logger.warnings
-                attempt["errors"] = logger.errors
-                summary["attempts"].append(attempt)
-                summary["verdict"] = "unexpected_content"
-                summary["failure_layer"] = "service-probe"
-                break
-            attempt["format_reference"] = format_reference
-            attempt["warnings"] = logger.warnings
-            attempt["errors"] = logger.errors
-            summary["attempts"].append(attempt)
-            summary["verdict"] = "pass"
-            summary["failure_layer"] = None
+        attempt: dict[str, Any] = {
+            "number": number,
+            "independent": check_watch_player(config),
+        }
+        extractor: dict[str, Any] = {"outcome": "tooling_failure"}
+        if extractor_ready:
+            try:
+                metadata, info = extract_unlock_video(config, logger)
+                extractor["metadata"] = metadata
+                logged_outcome = classify_failure(
+                    "\n".join(logger.warnings + logger.errors)
+                )
+                if logged_outcome != "extractor_failure":
+                    raise DownloadError(f"yt-dlp reported {logged_outcome}")
+                format_reference, content_error = validate_unlock(metadata, info)
+                if content_error:
+                    extractor["outcome"] = "unexpected_content"
+                    extractor["content_error"] = content_error
+                else:
+                    extractor["outcome"] = "pass"
+                    extractor["format_reference"] = format_reference
+            except (DownloadError, OSError, ValueError) as error:
+                message = "\n".join(logger.warnings + logger.errors + [str(error)])
+                extractor["outcome"] = classify_failure(message)
+                extractor["exception"] = redact_text(str(error))[:1_000]
+        extractor["warnings"] = logger.warnings
+        extractor["errors"] = logger.errors
+        attempt["extractor"] = extractor
+        summary["attempts"].append(attempt)
+        summary["verdict"] = compose_signals(
+            str(attempt["independent"]["outcome"]), str(extractor["outcome"])
+        )
+        summary["failure_layer"] = failure_layer(summary["verdict"])
+        if summary["verdict"] in {"pass", "pass_with_tooling_caveat"}:
             return finish(config.output, summary), 0
-        except (DownloadError, OSError, ValueError) as error:
-            message = "\n".join(logger.warnings + logger.errors + [str(error)])
-            outcome = classify_failure(message)
-            attempt["warnings"] = logger.warnings
-            attempt["errors"] = logger.errors
-            attempt["exception"] = redact_text(str(error))[:1_000]
-            attempt["outcome"] = outcome
-            summary["attempts"].append(attempt)
-            summary["verdict"] = outcome
-            summary["failure_layer"] = failure_layer(outcome)
-            if outcome != "network_failure":
-                break
+        if summary["verdict"] in SERVICE_FAILURES:
+            break
+        if (
+            attempt["independent"]["outcome"] != "network_failure"
+            and extractor["outcome"] != "network_failure"
+        ):
+            break
 
     return finish(config.output, summary), 2
 
@@ -320,16 +503,12 @@ def initial_summary(
 
 
 def failure_layer(outcome: str) -> str:
-    if outcome in {
-        "bot_challenge",
-        "consent_challenge",
-        "authentication_required",
-        "rate_limited",
-        "service_unavailable",
-    }:
+    if outcome in SERVICE_FAILURES:
         return "service-probe"
     if outcome == "tooling_failure":
         return "tooling"
+    if outcome in {"pass", "pass_with_tooling_caveat"}:
+        return "none"
     return "unknown"
 
 
@@ -367,6 +546,8 @@ def build_observation(summary: dict[str, Any], observed_at: datetime) -> dict[st
     availability, eligible = classify_result(verdict)
     trace = summary.get("trace") or {}
     inputs = summary["input"]
+    attempts = summary.get("attempts") or []
+    last_attempt = attempts[-1] if attempts else {}
     return {
         "schema_version": 1,
         "observation_id": str(uuid.uuid4()),
@@ -374,9 +555,15 @@ def build_observation(summary: dict[str, Any], observed_at: datetime) -> dict[st
         "fresh_until": (observed_at + timedelta(hours=24)).isoformat(),
         "scenario_id": "youtube.anonymous_public_video_unlock",
         "probe": {
-            "name": "youtube-unlock-yt-dlp",
-            "version": "1",
+            "name": "youtube-unlock-multisignal",
+            "version": "2",
             "execution": "local",
+            "methods": ["watch-player-response-v1", "yt-dlp-extractor"],
+            "tools": summary.get("tools") or {},
+            "signals": {
+                "watch_player": (last_attempt.get("independent") or {}).get("outcome"),
+                "yt_dlp": (last_attempt.get("extractor") or {}).get("outcome"),
+            },
         },
         "subject": {
             "instance_id": inputs.get("instance_id"),

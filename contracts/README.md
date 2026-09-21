@@ -6,6 +6,8 @@ service and performance evaluation.
 - `scenarios-v1.json` defines stable scenario identities, execution classes,
   runtime prerequisites, bounds, and whether a scenario may gate remediation.
 - `classifications-v1.json` defines availability and eligibility semantics.
+  `probe_dependent` is an inconclusive, ineligible result for disagreeing probe
+  methods; it does not reinterpret historical unavailable records.
 - `observation-v1.schema.json` defines the cross-runtime evidence envelope.
 - `observation-v2.schema.json` makes deployment origin, canonical capability
   identity, active config generation, evaluator build, and exact scenario

@@ -24,6 +24,7 @@
     "tooling_or_network_failure": {"availability": "unknown", "eligible": false},
     "probe_deadline_exceeded": {"availability": "unknown", "eligible": false},
     "extractor_failure": {"availability": "unknown", "eligible": false},
+    "probe_dependent": {"availability": "unknown", "eligible": false},
     "unexpected_content": {"availability": "unknown", "eligible": false},
     "unknown": {"availability": "unknown", "eligible": false}
   }

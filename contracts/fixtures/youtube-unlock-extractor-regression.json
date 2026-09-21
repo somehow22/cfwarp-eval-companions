@@ -1,0 +1,45 @@
+{
+  "fixture_version": 1,
+  "purpose": "diagnostic evidence that extractor challenge outcomes are tool- and egress-dependent, not canonical admission evidence",
+  "canonical_admission": false,
+  "node": "laxhd",
+  "video_id": "Qj71N0tBzRo",
+  "request_policy": {
+    "requests_per_case": 1,
+    "cookies": false,
+    "media_download": false,
+    "check_formats": true,
+    "skip_download": true,
+    "dump_single_json": true,
+    "socket_timeout_seconds": 20,
+    "retries": 0,
+    "extractor_retries": 0
+  },
+  "cases": [
+    {
+      "lane": "new prod-na-ipv4-performance",
+      "egress": {"warp": "on", "ip_family": "IPv4", "region": "US", "colo": "LAX"},
+      "yt_dlp_version": "2026.06.09",
+      "outcome": "pass",
+      "public": true,
+      "playability": "OK",
+      "format_count": 29,
+      "elapsed_ms": 4465
+    },
+    {
+      "lane": "new prod-na-ipv4-performance",
+      "egress": {"warp": "on", "ip_family": "IPv4", "region": "US", "colo": "LAX"},
+      "yt_dlp_version": "2026.07.04",
+      "outcome": "extractor_bot_challenge",
+      "format_count": 0
+    },
+    {
+      "lane": "hj-hobby legacy Direct WG",
+      "egress": {"warp": "on", "ip_family": "IPv4", "region": "US", "colo": "LAX"},
+      "yt_dlp_version": "2026.06.09",
+      "outcome": "extractor_bot_challenge",
+      "format_count": 0,
+      "elapsed_ms": 3010
+    }
+  ]
+}
