@@ -172,13 +172,15 @@ with definition digest
 `sha256:eee07d148db7c8f2ee0d291609b751b3fad1bc0ce7016bfc3f2e6bf59bc56860`.
 It pins yt-dlp's current primary public, non-age-restricted test video
 `YE7VzlLtp-4`, which upstream selected after retiring unavailable fixture
-`BaW_jenozKc`. Probe version 3 uses two target-node-local methods. An independent
+`BaW_jenozKc`. Probe version 4 uses two target-node-local methods. An independent
 HTTP client reads the anonymous watch page, parses its initial player response,
 and requires matching video metadata and `OK` playability. It grades format
 evidence as `direct_usable` for a valid direct HTTP(S) media URL or manifest,
 `advertised_only` for a structurally valid audio/video descriptor containing a
-cipher but no direct URL, and `absent` or `malformed` otherwise. Cipher-only
-formats are never independently usable. Separately, yt-dlp performs metadata
+cipher but no direct URL, `descriptor_advertised` for a validated positive itag
+and audio/video MIME descriptor whose delivery data is supplied elsewhere, and
+`absent` or `malformed` otherwise. Cipher-only and descriptor-only formats are
+never independently usable. Separately, yt-dlp performs metadata
 extraction with `download=False` and requires at least one direct HTTP(S) format
 reference with an explicit audio or video codec. Missing codec metadata,
 malformed or non-HTTP(S) URLs, and DRM-marked extractor references cannot pass.
@@ -194,9 +196,11 @@ is `pass_with_tooling_caveat`. Both are available. `advertised_only` plus yt-dlp
 success is also `pass`: the independent response proves matching, playable
 metadata and advertised media while the extractor proves usable formats.
 `advertised_only` plus any yt-dlp failure is `probe_dependent`, unknown, and
-ineligible. `absent`, `malformed`, and yt-dlp-only success are likewise
-inconclusive. An unavailable verdict requires both methods to report the same
-recognized service denial (`bot_challenge`, `consent_challenge`,
+ineligible. The same composition applies to `descriptor_advertised`: yt-dlp
+success is required for `pass`; any extractor failure is `probe_dependent`.
+`absent`, `malformed`, and yt-dlp-only success are likewise inconclusive. An
+unavailable verdict requires both methods to report the same recognized service
+denial (`bot_challenge`, `consent_challenge`,
 `authentication_required`, `rate_limited`, or `service_unavailable`). Mismatched
 denials and transport/tool-only failures remain unknown and ineligible.
 Admission therefore stays fail-closed without labeling inconclusive lanes
@@ -204,9 +208,10 @@ incapable.
 
 The summary stores only bounded diagnostics: response content type and encoding,
 body byte count and SHA-256, assignment-form counts, parser branch, and counts
-of descriptors, audio/video MIME types, direct URLs, valid cipher-only entries,
-and direct manifests. It never stores the page body, cookies, signed URLs, or
-request headers.
+of total, valid, and malformed descriptors, audio/video MIME types, direct URLs,
+valid cipher-only entries, and direct manifests. It retains only bounded itag,
+MIME, and content-length-presence metadata for one descriptor. It never stores
+the page body, cookies, signed URLs, or request headers.
 
 The sanitized `youtube-unlock-extractor-regression.json` fixture records a
 non-canonical LAX diagnostic: yt-dlp 2026.06.09 found 29 public formats through
@@ -236,18 +241,18 @@ uv run cfwarp-service-eval youtube-unlock \
   --config-digest sha256:example
 ```
 
-Observation evidence identifies probe `youtube-unlock-multisignal` version `3`,
-methods `watch-player-response-v2` and `yt-dlp-extractor`, their outcomes and
+Observation evidence identifies probe `youtube-unlock-multisignal` version `4`,
+methods `watch-player-response-v3` and `yt-dlp-extractor`, their outcomes and
 format-evidence strength, and the Python, HTTP client, yt-dlp, EJS, and Deno
 identities. The scenario catalog entry is unchanged because it already defines
 the service capability, node-local execution, and bounds rather than a
 particular extractor implementation; its version and definition digest
 therefore remain compatible.
 Previously stored `youtube-unlock-yt-dlp` version `1` and
-`youtube-unlock-multisignal` version `2` observations retain their original
-meaning and are not rewritten. Consumers that want the corrected methodology
-should require evaluator builds that emit probe version 3 and allow old records
-to expire before making publication or remediation claims.
+`youtube-unlock-multisignal` versions `2` and `3` observations retain their
+original meaning and are not rewritten. Consumers that want the corrected
+methodology should require evaluator builds that emit probe version 4 and allow
+old records to expire before making publication or remediation claims.
 
 An immutable publication must pin the evaluator image by digest, retain the
 locked Python dependencies, installed solver package, and exact Deno runtime, set

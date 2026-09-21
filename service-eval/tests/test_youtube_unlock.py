@@ -132,7 +132,7 @@ def test_unlock_pass_requires_metadata_and_sanitized_format_reference(
         "youtube.anonymous_public_video_unlock"
     )
     assert summary["observation"]["probe"]["name"] == "youtube-unlock-multisignal"
-    assert summary["observation"]["probe"]["version"] == "3"
+    assert summary["observation"]["probe"]["version"] == "4"
     assert summary["observation"]["probe"]["tools"]["yt_dlp"]["version"]
     assert summary["observation"]["probe"]["signals"] == {
         "watch_player": "pass",
@@ -271,6 +271,62 @@ def test_advertised_watch_formats_plus_yt_dlp_usable_formats_pass(
     }
 
 
+def test_33_descriptor_regression_plus_yt_dlp_formats_passes(
+    tmp_path: Path, monkeypatch, ready
+) -> None:
+    descriptors = [
+        {
+            "itag": index + 100,
+            "mimeType": "video/mp4" if index % 2 else "audio/mp4",
+            "bitrate": 100_000 + index,
+            "quality": "medium",
+        }
+        for index in range(33)
+    ]
+    independent = validate_player_response(
+        {
+            "playabilityStatus": {"status": "OK"},
+            "videoDetails": {"videoId": FIXED_VIDEO_ID, "title": "fixture"},
+            "streamingData": {"formats": descriptors},
+        }
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.check_watch_player",
+        lambda _config: independent,
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.extract_unlock_video",
+        lambda *_args: extracted_info(format_count=27),
+    )
+
+    summary, exit_code = run_probe(config(tmp_path))
+
+    assert independent["outcome"] == "pass"
+    assert independent["format_evidence"]["strength"] == "descriptor_advertised"
+    assert independent["format_evidence"]["diagnostics"] == {
+        "descriptor_count": 33,
+        "valid_descriptor_count": 33,
+        "malformed_descriptor_count": 0,
+        "audio_video_mime_count": 33,
+        "direct_url_count": 0,
+        "cipher_only_count": 0,
+        "manifest_count": 0,
+    }
+    assert independent["format_evidence"]["reference"] == {
+        "itag": 100,
+        "mime_type": "audio/mp4",
+        "content_length_present": False,
+    }
+    assert exit_code == 0
+    assert summary["verdict"] == "pass"
+    assert summary["observation"]["result"]["availability"] == "available"
+    assert summary["observation"]["probe"]["signals"] == {
+        "watch_player": "pass",
+        "watch_format_strength": "descriptor_advertised",
+        "yt_dlp": "pass",
+    }
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -353,6 +409,8 @@ def test_independent_ciphered_formats_are_advertised_but_not_directly_usable() -
     assert evidence["kind"] == "ciphered_format"
     assert evidence["diagnostics"] == {
         "descriptor_count": 1,
+        "valid_descriptor_count": 1,
+        "malformed_descriptor_count": 0,
         "audio_video_mime_count": 1,
         "direct_url_count": 0,
         "cipher_only_count": 1,
@@ -369,7 +427,9 @@ def test_independent_ciphered_formats_are_advertised_but_not_directly_usable() -
         "url=https%3A%2F%2Fmedia.example%2Fvideo",
     ],
 )
-def test_independent_rejects_malformed_cipher_evidence(cipher: str) -> None:
+def test_valid_descriptor_with_malformed_cipher_is_descriptor_advertised(
+    cipher: str,
+) -> None:
     evidence = select_player_format_evidence(
         {
             "streamingData": {
@@ -384,8 +444,29 @@ def test_independent_rejects_malformed_cipher_evidence(cipher: str) -> None:
         }
     )
 
-    assert evidence["strength"] == "malformed"
+    assert evidence["strength"] == "descriptor_advertised"
+    assert evidence["diagnostics"]["valid_descriptor_count"] == 1
     assert evidence["diagnostics"]["cipher_only_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "formats",
+    [
+        "not-a-list",
+        [None],
+        [{"itag": "18", "mimeType": "video/mp4"}],
+        [{"itag": 0, "mimeType": "video/mp4"}],
+        [{"itag": True, "mimeType": "video/mp4"}],
+        [{"itag": 18, "mimeType": "application/json"}],
+        [{"itag": 18, "mimeType": None}],
+    ],
+)
+def test_independent_rejects_malformed_descriptor_structure(formats) -> None:
+    evidence = select_player_format_evidence({"streamingData": {"formats": formats}})
+
+    assert evidence["strength"] == "malformed"
+    assert evidence["diagnostics"]["valid_descriptor_count"] == 0
+    assert evidence["diagnostics"]["malformed_descriptor_count"] >= 1
 
 
 @pytest.mark.parametrize(
@@ -505,6 +586,10 @@ def test_independent_player_validation_rejects_malformed_responses(player) -> No
         ("advertised_only", "extractor_failure", "probe_dependent"),
         ("advertised_only", "tooling_failure", "probe_dependent"),
         ("advertised_only", "bot_challenge", "probe_dependent"),
+        ("descriptor_advertised", "pass", "pass"),
+        ("descriptor_advertised", "extractor_failure", "probe_dependent"),
+        ("descriptor_advertised", "tooling_failure", "probe_dependent"),
+        ("descriptor_advertised", "bot_challenge", "probe_dependent"),
         ("absent", "pass", "probe_dependent"),
         ("malformed", "pass", "probe_dependent"),
     ],

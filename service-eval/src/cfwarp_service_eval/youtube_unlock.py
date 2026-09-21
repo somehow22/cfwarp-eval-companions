@@ -241,35 +241,52 @@ def select_player_format_evidence(player: dict[str, Any]) -> dict[str, Any]:
             "strength": "absent",
             "diagnostics": {
                 "descriptor_count": 0,
+                "valid_descriptor_count": 0,
+                "malformed_descriptor_count": 0,
                 "audio_video_mime_count": 0,
                 "direct_url_count": 0,
                 "cipher_only_count": 0,
                 "manifest_count": 0,
             },
         }
-    formats = [
-        item
-        for key in ("formats", "adaptiveFormats")
-        for item in streaming.get(key) or []
-        if isinstance(item, dict)
-    ]
+    formats: list[Any] = []
+    malformed_structure = False
+    for key in ("formats", "adaptiveFormats"):
+        if key not in streaming:
+            continue
+        items = streaming[key]
+        if not isinstance(items, list):
+            malformed_structure = True
+            continue
+        formats.extend(items)
     mime_count = 0
+    malformed_count = 1 if malformed_structure else 0
+    valid_formats: list[dict[str, Any]] = []
     direct_formats: list[dict[str, Any]] = []
     cipher_formats: list[dict[str, Any]] = []
     for item in formats:
+        if not isinstance(item, dict):
+            malformed_count += 1
+            continue
         mime_type = item.get("mimeType")
         itag = item.get("itag")
-        if not isinstance(itag, int) or itag <= 0 or not isinstance(mime_type, str):
+        if not isinstance(mime_type, str):
+            malformed_count += 1
             continue
         media_type = mime_type.split(";", 1)[0].strip().casefold()
         if not media_type.startswith(("audio/", "video/")):
+            malformed_count += 1
             continue
         mime_count += 1
+        if isinstance(itag, bool) or not isinstance(itag, int) or itag <= 0:
+            malformed_count += 1
+            continue
         reference = {
             "itag": itag,
             "mime_type": mime_type[:300],
             "content_length_present": bool(item.get("contentLength")),
         }
+        valid_formats.append(reference)
         if direct_http_url(item.get("url")):
             direct_formats.append(reference)
             continue
@@ -292,6 +309,8 @@ def select_player_format_evidence(player: dict[str, Any]) -> dict[str, Any]:
     ]
     diagnostics = {
         "descriptor_count": len(formats),
+        "valid_descriptor_count": len(valid_formats),
+        "malformed_descriptor_count": malformed_count,
         "audio_video_mime_count": mime_count,
         "direct_url_count": len(direct_formats),
         "cipher_only_count": len(cipher_formats),
@@ -318,8 +337,17 @@ def select_player_format_evidence(player: dict[str, Any]) -> dict[str, Any]:
             "reference": cipher_formats[0],
             "diagnostics": diagnostics,
         }
+    if valid_formats:
+        return {
+            "strength": "descriptor_advertised",
+            "kind": "format_descriptor",
+            "reference": valid_formats[0],
+            "diagnostics": diagnostics,
+        }
     return {
-        "strength": "malformed" if formats or streaming else "absent",
+        "strength": (
+            "malformed" if formats or streaming or malformed_structure else "absent"
+        ),
         "diagnostics": diagnostics,
     }
 
@@ -367,6 +395,8 @@ def check_watch_player(config: YouTubeUnlockConfig) -> dict[str, Any]:
         "parse_branch": "not_parsed",
         "formats": {
             "descriptor_count": 0,
+            "valid_descriptor_count": 0,
+            "malformed_descriptor_count": 0,
             "audio_video_mime_count": 0,
             "direct_url_count": 0,
             "cipher_only_count": 0,
@@ -475,7 +505,7 @@ def compose_signals(
     if independent == "pass":
         if format_strength == "direct_usable":
             return "pass" if extractor == "pass" else "pass_with_tooling_caveat"
-        if format_strength == "advertised_only":
+        if format_strength in {"advertised_only", "descriptor_advertised"}:
             return "pass" if extractor == "pass" else "probe_dependent"
         return "probe_dependent"
     if independent in SERVICE_FAILURES and independent == extractor:
@@ -691,9 +721,9 @@ def build_observation(summary: dict[str, Any], observed_at: datetime) -> dict[st
         "scenario_id": "youtube.anonymous_public_video_unlock",
         "probe": {
             "name": "youtube-unlock-multisignal",
-            "version": "3",
+            "version": "4",
             "execution": "local",
-            "methods": ["watch-player-response-v2", "yt-dlp-extractor"],
+            "methods": ["watch-player-response-v3", "yt-dlp-extractor"],
             "tools": summary.get("tools") or {},
             "signals": {
                 "watch_player": (last_attempt.get("independent") or {}).get("outcome"),
