@@ -20,6 +20,7 @@ from cfwarp_service_eval.youtube_unlock import (
     pinned_ejs_assets,
     run_probe,
     select_format_reference,
+    select_player_format_evidence,
     validate_player_response,
 )
 
@@ -63,14 +64,15 @@ def ready(monkeypatch):
     )
 
 
-def independent_success():
+def independent_success(strength: str = "direct_usable"):
     return {
         "outcome": "pass",
         "metadata": {"id": FIXED_VIDEO_ID, "title_present": True},
-        "format_reference": {
-            "itag": 18,
-            "mime_type": 'video/mp4; codecs="avc1, mp4a"',
-            "content_length_present": True,
+        "format_evidence": {
+            "strength": strength,
+            "kind": (
+                "format_url" if strength == "direct_usable" else "ciphered_format"
+            ),
         },
     }
 
@@ -130,10 +132,11 @@ def test_unlock_pass_requires_metadata_and_sanitized_format_reference(
         "youtube.anonymous_public_video_unlock"
     )
     assert summary["observation"]["probe"]["name"] == "youtube-unlock-multisignal"
-    assert summary["observation"]["probe"]["version"] == "2"
+    assert summary["observation"]["probe"]["version"] == "3"
     assert summary["observation"]["probe"]["tools"]["yt_dlp"]["version"]
     assert summary["observation"]["probe"]["signals"] == {
         "watch_player": "pass",
+        "watch_format_strength": "direct_usable",
         "yt_dlp": "pass",
     }
 
@@ -208,7 +211,10 @@ def test_lax_diagnostic_regression_is_context_not_canonical_admission() -> None:
         "extractor_bot_challenge",
     ]
     assert {case["egress"]["colo"] for case in fixture["cases"]} == {"LAX"}
-    assert compose_signals("pass", "bot_challenge") == "pass_with_tooling_caveat"
+    assert (
+        compose_signals("pass", "bot_challenge", "direct_usable")
+        == "pass_with_tooling_caveat"
+    )
 
 
 def test_yt_dlp_success_alone_is_probe_dependent_and_fail_closed(
@@ -234,6 +240,34 @@ def test_yt_dlp_success_alone_is_probe_dependent_and_fail_closed(
         "availability": "unknown",
         "class": "probe_dependent",
         "eligible": False,
+    }
+
+
+def test_advertised_watch_formats_plus_yt_dlp_usable_formats_pass(
+    tmp_path: Path, monkeypatch, ready
+) -> None:
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.check_watch_player",
+        lambda _config: independent_success("advertised_only"),
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.extract_unlock_video",
+        lambda *_args: extracted_info(format_count=27),
+    )
+
+    summary, exit_code = run_probe(config(tmp_path))
+
+    assert exit_code == 0
+    assert summary["verdict"] == "pass"
+    assert summary["observation"]["result"] == {
+        "availability": "available",
+        "class": "pass",
+        "eligible": True,
+    }
+    assert summary["observation"]["probe"]["signals"] == {
+        "watch_player": "pass",
+        "watch_format_strength": "advertised_only",
+        "yt_dlp": "pass",
     }
 
 
@@ -292,8 +326,85 @@ def test_independent_watch_parser_requires_metadata_and_direct_usable_format() -
 
     assert result["outcome"] == "pass"
     assert result["metadata"] == {"id": FIXED_VIDEO_ID, "title_present": True}
-    assert result["format_reference"]["itag"] == 18
-    assert "url" not in result["format_reference"]
+    assert result["format_evidence"]["strength"] == "direct_usable"
+    assert result["format_evidence"]["reference"]["itag"] == 18
+    assert "url" not in result["format_evidence"]["reference"]
+
+
+def test_independent_ciphered_formats_are_advertised_but_not_directly_usable() -> None:
+    evidence = select_player_format_evidence(
+        {
+            "streamingData": {
+                "adaptiveFormats": [
+                    {
+                        "itag": 137,
+                        "mimeType": 'video/mp4; codecs="avc1"',
+                        "signatureCipher": (
+                            "url=https%3A%2F%2Fmedia.example%2Fvideoplayback"
+                            "&sp=sig&s=opaque"
+                        ),
+                    }
+                ]
+            }
+        }
+    )
+
+    assert evidence["strength"] == "advertised_only"
+    assert evidence["kind"] == "ciphered_format"
+    assert evidence["diagnostics"] == {
+        "descriptor_count": 1,
+        "audio_video_mime_count": 1,
+        "direct_url_count": 0,
+        "cipher_only_count": 1,
+        "manifest_count": 0,
+    }
+    assert "url" not in evidence["reference"]
+
+
+@pytest.mark.parametrize(
+    "cipher",
+    [
+        "s=opaque",
+        "url=ftp%3A%2F%2Fmedia.example%2Fvideo&s=opaque",
+        "url=https%3A%2F%2Fmedia.example%2Fvideo",
+    ],
+)
+def test_independent_rejects_malformed_cipher_evidence(cipher: str) -> None:
+    evidence = select_player_format_evidence(
+        {
+            "streamingData": {
+                "formats": [
+                    {
+                        "itag": 18,
+                        "mimeType": "video/mp4",
+                        "signatureCipher": cipher,
+                    }
+                ]
+            }
+        }
+    )
+
+    assert evidence["strength"] == "malformed"
+    assert evidence["diagnostics"]["cipher_only_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("manifest", "strength"),
+    [
+        ("https://manifest.example/video.m3u8", "direct_usable"),
+        ("ftp://manifest.example/video.m3u8", "malformed"),
+        ("https:///missing-host", "malformed"),
+    ],
+)
+def test_independent_manifest_must_be_direct_http(manifest: str, strength: str) -> None:
+    evidence = select_player_format_evidence(
+        {"streamingData": {"hlsManifestUrl": manifest}}
+    )
+
+    assert evidence["strength"] == strength
+    assert evidence["diagnostics"]["manifest_count"] == (
+        1 if strength == "direct_usable" else 0
+    )
 
 
 def test_independent_check_makes_one_bounded_watch_request_without_media(
@@ -317,7 +428,10 @@ def test_independent_check_makes_one_bounded_watch_request_without_media(
     class Response:
         status_code = 200
         url = FIXED_VIDEO_URL
-        headers = {}
+        headers = {
+            "content-type": "text/html; charset=utf-8",
+            "content-encoding": "identity",
+        }
 
         def __enter__(self):
             return self
@@ -350,6 +464,18 @@ def test_independent_check_makes_one_bounded_watch_request_without_media(
     assert calls[1:] == [("GET", FIXED_VIDEO_URL)]
     assert calls[0][1]["timeout"] == 25
     assert calls[0][1]["follow_redirects"] is False
+    assert result["diagnostics"]["content_type"] == "text/html; charset=utf-8"
+    assert result["diagnostics"]["content_encoding"] == "identity"
+    assert result["diagnostics"]["body_bytes"] > 0
+    assert result["diagnostics"]["body_sha256"].startswith("sha256:")
+    assert result["diagnostics"]["assignment_counts"] == {
+        "assignment": 1,
+        "object_property": 0,
+    }
+    assert result["diagnostics"]["parse_branch"] == "assignment_object"
+    assert result["diagnostics"]["formats"]["direct_url_count"] == 1
+    assert "media.example" not in json.dumps(result)
+    assert "secret" not in json.dumps(result)
 
 
 @pytest.mark.parametrize(
@@ -368,8 +494,28 @@ def test_independent_player_validation_rejects_malformed_responses(player) -> No
     assert validate_player_response(player)["outcome"] == "unexpected_content"
 
 
-def test_verdict_composition_requires_independent_success_or_matching_denial() -> None:
-    assert compose_signals("pass", "extractor_failure") == "pass_with_tooling_caveat"
+@pytest.mark.parametrize(
+    ("strength", "extractor", "verdict"),
+    [
+        ("direct_usable", "pass", "pass"),
+        ("direct_usable", "extractor_failure", "pass_with_tooling_caveat"),
+        ("direct_usable", "tooling_failure", "pass_with_tooling_caveat"),
+        ("direct_usable", "bot_challenge", "pass_with_tooling_caveat"),
+        ("advertised_only", "pass", "pass"),
+        ("advertised_only", "extractor_failure", "probe_dependent"),
+        ("advertised_only", "tooling_failure", "probe_dependent"),
+        ("advertised_only", "bot_challenge", "probe_dependent"),
+        ("absent", "pass", "probe_dependent"),
+        ("malformed", "pass", "probe_dependent"),
+    ],
+)
+def test_verdict_composition_models_independent_format_strength(
+    strength: str, extractor: str, verdict: str
+) -> None:
+    assert compose_signals("pass", extractor, strength) == verdict
+
+
+def test_verdict_composition_requires_matching_service_denial() -> None:
     assert compose_signals("unexpected_content", "pass") == "probe_dependent"
     assert compose_signals("bot_challenge", "bot_challenge") == "bot_challenge"
     assert compose_signals("bot_challenge", "extractor_failure") == "probe_dependent"

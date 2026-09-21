@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import importlib.resources
+import hashlib
 import json
 import platform
 import re
@@ -14,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import yt_dlp
@@ -193,9 +194,20 @@ def validate_unlock(
     return format_reference, None
 
 
-def player_response_from_watch_page(body: str) -> dict[str, Any]:
+def player_response_from_watch_page(
+    body: str, diagnostics: dict[str, Any] | None = None
+) -> dict[str, Any]:
     decoder = json.JSONDecoder()
-    for marker in ("ytInitialPlayerResponse =", '"ytInitialPlayerResponse":'):
+    counts = {
+        "assignment": len(re.findall(r"ytInitialPlayerResponse\s*=", body)),
+        "object_property": len(re.findall(r'"ytInitialPlayerResponse"\s*:', body)),
+    }
+    if diagnostics is not None:
+        diagnostics["assignment_counts"] = counts
+    for name, marker in (
+        ("assignment", "ytInitialPlayerResponse ="),
+        ("object_property", '"ytInitialPlayerResponse":'),
+    ):
         start = body.find(marker)
         if start < 0:
             continue
@@ -205,39 +217,111 @@ def player_response_from_watch_page(body: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
+            if diagnostics is not None:
+                diagnostics["assignment_form"] = name
+                diagnostics["parse_branch"] = f"{name}_object"
             return value
+    if diagnostics is not None:
+        diagnostics["assignment_form"] = "none"
+        diagnostics["parse_branch"] = "not_parsed"
     raise ValueError("watch page lacks a valid initial player response")
 
 
-def select_player_format(player: dict[str, Any]) -> dict[str, Any] | None:
+def direct_http_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = urlsplit(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def select_player_format_evidence(player: dict[str, Any]) -> dict[str, Any]:
     streaming = player.get("streamingData")
     if not isinstance(streaming, dict):
-        return None
+        return {
+            "strength": "absent",
+            "diagnostics": {
+                "descriptor_count": 0,
+                "audio_video_mime_count": 0,
+                "direct_url_count": 0,
+                "cipher_only_count": 0,
+                "manifest_count": 0,
+            },
+        }
     formats = [
         item
         for key in ("formats", "adaptiveFormats")
         for item in streaming.get(key) or []
         if isinstance(item, dict)
     ]
+    mime_count = 0
+    direct_formats: list[dict[str, Any]] = []
+    cipher_formats: list[dict[str, Any]] = []
     for item in formats:
-        url = item.get("url")
         mime_type = item.get("mimeType")
-        if not isinstance(url, str) or not isinstance(mime_type, str):
+        itag = item.get("itag")
+        if not isinstance(itag, int) or itag <= 0 or not isinstance(mime_type, str):
             continue
-        parsed = urlsplit(url)
         media_type = mime_type.split(";", 1)[0].strip().casefold()
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.netloc
-            or not media_type.startswith(("audio/", "video/"))
-        ):
+        if not media_type.startswith(("audio/", "video/")):
             continue
-        return {
-            "itag": item.get("itag"),
+        mime_count += 1
+        reference = {
+            "itag": itag,
             "mime_type": mime_type[:300],
             "content_length_present": bool(item.get("contentLength")),
         }
-    return None
+        if direct_http_url(item.get("url")):
+            direct_formats.append(reference)
+            continue
+        cipher = item.get("signatureCipher") or item.get("cipher")
+        if not isinstance(cipher, str):
+            continue
+        try:
+            values = parse_qs(cipher, keep_blank_values=False, max_num_fields=20)
+        except ValueError:
+            continue
+        if direct_http_url((values.get("url") or [None])[0]) and (
+            values.get("s") or values.get("sig")
+        ):
+            cipher_formats.append(reference)
+
+    manifests = [
+        key
+        for key in ("hlsManifestUrl", "dashManifestUrl")
+        if direct_http_url(streaming.get(key))
+    ]
+    diagnostics = {
+        "descriptor_count": len(formats),
+        "audio_video_mime_count": mime_count,
+        "direct_url_count": len(direct_formats),
+        "cipher_only_count": len(cipher_formats),
+        "manifest_count": len(manifests),
+    }
+    if direct_formats:
+        return {
+            "strength": "direct_usable",
+            "kind": "format_url",
+            "reference": direct_formats[0],
+            "diagnostics": diagnostics,
+        }
+    if manifests:
+        return {
+            "strength": "direct_usable",
+            "kind": "manifest",
+            "manifest_type": manifests[0],
+            "diagnostics": diagnostics,
+        }
+    if cipher_formats:
+        return {
+            "strength": "advertised_only",
+            "kind": "ciphered_format",
+            "reference": cipher_formats[0],
+            "diagnostics": diagnostics,
+        }
+    return {
+        "strength": "malformed" if formats or streaming else "absent",
+        "diagnostics": diagnostics,
+    }
 
 
 def validate_player_response(player: dict[str, Any]) -> dict[str, Any]:
@@ -261,21 +345,34 @@ def validate_player_response(player: dict[str, Any]) -> dict[str, Any]:
     title = details.get("title")
     if not isinstance(title, str) or not title.strip():
         return {"outcome": "unexpected_content", "content_error": "missing_title"}
-    format_reference = select_player_format(player)
-    if format_reference is None:
+    format_evidence = select_player_format_evidence(player)
+    if format_evidence["strength"] in {"absent", "malformed"}:
         return {
             "outcome": "unexpected_content",
-            "content_error": "missing_direct_usable_format",
+            "content_error": f"{format_evidence['strength']}_format_evidence",
+            "format_evidence": format_evidence,
         }
     return {
         "outcome": "pass",
         "metadata": {"id": details["videoId"], "title_present": True},
-        "format_reference": format_reference,
+        "format_evidence": format_evidence,
     }
 
 
 def check_watch_player(config: YouTubeUnlockConfig) -> dict[str, Any]:
     started = time.monotonic()
+    diagnostics: dict[str, Any] = {
+        "assignment_counts": {"assignment": 0, "object_property": 0},
+        "assignment_form": "not_checked",
+        "parse_branch": "not_parsed",
+        "formats": {
+            "descriptor_count": 0,
+            "audio_video_mime_count": 0,
+            "direct_url_count": 0,
+            "cipher_only_count": 0,
+            "manifest_count": 0,
+        },
+    }
     try:
         with httpx.Client(
             proxy=httpx_proxy(config.proxy),
@@ -292,19 +389,42 @@ def check_watch_player(config: YouTubeUnlockConfig) -> dict[str, Any]:
                 body = bytearray()
                 for chunk in response.iter_raw():
                     if len(chunk) > MAX_WATCH_BYTES - len(body):
+                        diagnostics.update(
+                            {
+                                "body_bytes": len(body) + len(chunk),
+                                "body_sha256": None,
+                                "content_type": response.headers.get(
+                                    "content-type", ""
+                                )[:200],
+                                "content_encoding": response.headers.get(
+                                    "content-encoding", ""
+                                )[:100],
+                            }
+                        )
                         return {
                             "outcome": "unexpected_content",
                             "content_error": "oversized_watch_page",
                             "http_status": response.status_code,
+                            "diagnostics": diagnostics,
                         }
                     body.extend(chunk)
                 final_url = str(response.url)
                 status = response.status_code
                 location = response.headers.get("location", "")
+                diagnostics.update(
+                    {
+                        "content_type": response.headers.get("content-type", "")[:200],
+                        "content_encoding": response.headers.get(
+                            "content-encoding", ""
+                        )[:100],
+                        "body_bytes": len(body),
+                        "body_sha256": f"sha256:{hashlib.sha256(body).hexdigest()}",
+                    }
+                )
         text = body.decode("utf-8", errors="replace")
         if 200 <= status < 300:
             try:
-                player = player_response_from_watch_page(text)
+                player = player_response_from_watch_page(text, diagnostics)
             except ValueError:
                 classified = classify_failure(text)
                 if classified in SERVICE_FAILURES:
@@ -313,6 +433,10 @@ def check_watch_player(config: YouTubeUnlockConfig) -> dict[str, Any]:
                     raise
             else:
                 result = validate_player_response(player)
+                format_evidence = result.get("format_evidence") or {}
+                diagnostics["formats"] = (
+                    format_evidence.get("diagnostics") or diagnostics["formats"]
+                )
         else:
             classified = classify_failure(
                 f"status code {status} {final_url} {location} {text}"
@@ -326,6 +450,7 @@ def check_watch_player(config: YouTubeUnlockConfig) -> dict[str, Any]:
             }
         if "http_status" not in result:
             result["http_status"] = status
+        result["diagnostics"] = diagnostics
         result["elapsed_ms"] = round((time.monotonic() - started) * 1_000)
         return result
     except (httpx.HTTPError, OSError) as error:
@@ -339,13 +464,20 @@ def check_watch_player(config: YouTubeUnlockConfig) -> dict[str, Any]:
         return {
             "outcome": "unexpected_content",
             "content_error": str(error)[:300],
+            "diagnostics": diagnostics,
             "elapsed_ms": round((time.monotonic() - started) * 1_000),
         }
 
 
-def compose_signals(independent: str, extractor: str) -> str:
+def compose_signals(
+    independent: str, extractor: str, format_strength: str | None = None
+) -> str:
     if independent == "pass":
-        return "pass" if extractor == "pass" else "pass_with_tooling_caveat"
+        if format_strength == "direct_usable":
+            return "pass" if extractor == "pass" else "pass_with_tooling_caveat"
+        if format_strength == "advertised_only":
+            return "pass" if extractor == "pass" else "probe_dependent"
+        return "probe_dependent"
     if independent in SERVICE_FAILURES and independent == extractor:
         return independent
     if (
@@ -451,8 +583,11 @@ def _run_probe(config: YouTubeUnlockConfig) -> tuple[dict[str, Any], int]:
         extractor["errors"] = logger.errors
         attempt["extractor"] = extractor
         summary["attempts"].append(attempt)
+        format_evidence = attempt["independent"].get("format_evidence") or {}
         summary["verdict"] = compose_signals(
-            str(attempt["independent"]["outcome"]), str(extractor["outcome"])
+            str(attempt["independent"]["outcome"]),
+            str(extractor["outcome"]),
+            format_evidence.get("strength"),
         )
         summary["failure_layer"] = failure_layer(summary["verdict"])
         if summary["verdict"] in {"pass", "pass_with_tooling_caveat"}:
@@ -556,12 +691,15 @@ def build_observation(summary: dict[str, Any], observed_at: datetime) -> dict[st
         "scenario_id": "youtube.anonymous_public_video_unlock",
         "probe": {
             "name": "youtube-unlock-multisignal",
-            "version": "2",
+            "version": "3",
             "execution": "local",
-            "methods": ["watch-player-response-v1", "yt-dlp-extractor"],
+            "methods": ["watch-player-response-v2", "yt-dlp-extractor"],
             "tools": summary.get("tools") or {},
             "signals": {
                 "watch_player": (last_attempt.get("independent") or {}).get("outcome"),
+                "watch_format_strength": (
+                    (last_attempt.get("independent") or {}).get("format_evidence") or {}
+                ).get("strength"),
                 "yt_dlp": (last_attempt.get("extractor") or {}).get("outcome"),
             },
         },
