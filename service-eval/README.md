@@ -172,7 +172,7 @@ with definition digest
 `sha256:eee07d148db7c8f2ee0d291609b751b3fad1bc0ce7016bfc3f2e6bf59bc56860`.
 It pins yt-dlp's current primary public, non-age-restricted test video
 `YE7VzlLtp-4`, which upstream selected after retiring unavailable fixture
-`BaW_jenozKc`. Probe version 4 uses two target-node-local methods. An independent
+`BaW_jenozKc`. Probe version 5 uses two target-node-local methods. An independent
 HTTP client reads the anonymous watch page, parses its initial player response,
 and requires matching video metadata and `OK` playability. It grades format
 evidence as `direct_usable` for a valid direct HTTP(S) media URL or manifest,
@@ -213,6 +213,14 @@ valid cipher-only entries, and direct manifests. It retains only bounded itag,
 MIME, and content-length-presence metadata for one descriptor. It never stores
 the page body, cookies, signed URLs, or request headers.
 
+Version 5 remains non-following and does not change verdict composition. For a
+301, 302, 303, 307, or 308 response it stores one sanitized redirect record:
+status, scheme, normalized hostname and query-free path, same-origin and
+canonical-video-ID-preserved booleans, default-port and userinfo booleans, and a
+terminal class of `canonical`, `consent`, `challenge`, or `other`. The record is
+bounded and stores no query or fragment values, `Location` value, body, headers,
+cookies, credentials, resolved addresses, or signed URLs.
+
 The sanitized `youtube-unlock-extractor-regression.json` fixture records a
 non-canonical LAX diagnostic: yt-dlp 2026.06.09 found 29 public formats through
 one production lane where 2026.07.04 reported a bot challenge, while the older
@@ -241,18 +249,18 @@ uv run cfwarp-service-eval youtube-unlock \
   --config-digest sha256:example
 ```
 
-Observation evidence identifies probe `youtube-unlock-multisignal` version `4`,
-methods `watch-player-response-v3` and `yt-dlp-extractor`, their outcomes and
+Observation evidence identifies probe `youtube-unlock-multisignal` version `5`,
+methods `watch-player-response-v4` and `yt-dlp-extractor`, their outcomes and
 format-evidence strength, and the Python, HTTP client, yt-dlp, EJS, and Deno
 identities. The scenario catalog entry is unchanged because it already defines
 the service capability, node-local execution, and bounds rather than a
 particular extractor implementation; its version and definition digest
 therefore remain compatible.
 Previously stored `youtube-unlock-yt-dlp` version `1` and
-`youtube-unlock-multisignal` versions `2` and `3` observations retain their
-original meaning and are not rewritten. Consumers that want the corrected
-methodology should require evaluator builds that emit probe version 4 and allow
-old records to expire before making publication or remediation claims.
+`youtube-unlock-multisignal` versions `2` through `4` observations retain their
+original meaning and are not rewritten. Consumers that need redirect diagnostics
+should require evaluator builds that emit probe version 5 and allow old records
+to expire before making publication or remediation claims.
 
 An immutable publication must pin the evaluator image by digest, retain the
 locked Python dependencies, installed solver package, and exact Deno runtime, set

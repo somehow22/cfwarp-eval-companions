@@ -19,6 +19,7 @@ from cfwarp_service_eval.youtube_unlock import (
     pinned_deno_identity,
     pinned_ejs_assets,
     run_probe,
+    sanitized_redirect,
     select_format_reference,
     select_player_format_evidence,
     validate_player_response,
@@ -132,7 +133,7 @@ def test_unlock_pass_requires_metadata_and_sanitized_format_reference(
         "youtube.anonymous_public_video_unlock"
     )
     assert summary["observation"]["probe"]["name"] == "youtube-unlock-multisignal"
-    assert summary["observation"]["probe"]["version"] == "4"
+    assert summary["observation"]["probe"]["version"] == "5"
     assert summary["observation"]["probe"]["tools"]["yt_dlp"]["version"]
     assert summary["observation"]["probe"]["signals"] == {
         "watch_player": "pass",
@@ -557,6 +558,191 @@ def test_independent_check_makes_one_bounded_watch_request_without_media(
     assert result["diagnostics"]["formats"]["direct_url_count"] == 1
     assert "media.example" not in json.dumps(result)
     assert "secret" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        (
+            f"/watch?v={FIXED_VIDEO_ID}&tracking=discarded#fragment",
+            {
+                "scheme": "https",
+                "normalized_hostname": "www.youtube.com",
+                "normalized_path": "/watch",
+                "same_origin": True,
+                "canonical_video_id_preserved": True,
+                "default_port": True,
+                "userinfo_present": False,
+                "terminal_class": "canonical",
+            },
+        ),
+        (
+            f"https://m.youtube.com/watch?v={FIXED_VIDEO_ID}",
+            {
+                "scheme": "https",
+                "normalized_hostname": "m.youtube.com",
+                "normalized_path": "/watch",
+                "same_origin": False,
+                "canonical_video_id_preserved": True,
+                "default_port": True,
+                "userinfo_present": False,
+                "terminal_class": "canonical",
+            },
+        ),
+        (
+            f"https://consent.youtube.com/m?continue=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3D{FIXED_VIDEO_ID}",
+            {
+                "scheme": "https",
+                "normalized_hostname": "consent.youtube.com",
+                "normalized_path": "/m",
+                "same_origin": False,
+                "canonical_video_id_preserved": False,
+                "default_port": True,
+                "userinfo_present": False,
+                "terminal_class": "consent",
+            },
+        ),
+        (
+            "https://www.google.com/sorry/index?continue=discarded",
+            {
+                "scheme": "https",
+                "normalized_hostname": "www.google.com",
+                "normalized_path": "/sorry/index",
+                "same_origin": False,
+                "canonical_video_id_preserved": False,
+                "default_port": True,
+                "userinfo_present": False,
+                "terminal_class": "challenge",
+            },
+        ),
+        (
+            f"https://user:secret@www.youtube.com:8443/watch?v={FIXED_VIDEO_ID}",
+            {
+                "scheme": "https",
+                "normalized_hostname": "www.youtube.com",
+                "normalized_path": "/watch",
+                "same_origin": False,
+                "canonical_video_id_preserved": True,
+                "default_port": False,
+                "userinfo_present": True,
+                "terminal_class": "other",
+            },
+        ),
+    ],
+)
+def test_redirect_diagnostic_sanitizes_relative_absolute_and_terminal_targets(
+    location: str, expected: dict
+) -> None:
+    record = sanitized_redirect(302, FIXED_VIDEO_URL, location)
+
+    assert record == {"status": 302, **expected}
+    serialized = json.dumps(record)
+    assert FIXED_VIDEO_ID not in serialized
+    assert "tracking" not in serialized
+    assert "discarded" not in serialized
+    assert "secret" not in serialized
+
+
+@pytest.mark.parametrize("location", ["", "https://[invalid", "x" * 2_049])
+def test_redirect_diagnostic_has_fixed_safe_shape_for_malformed_location(
+    location: str,
+) -> None:
+    assert sanitized_redirect(307, FIXED_VIDEO_URL, location) == {
+        "status": 307,
+        "scheme": None,
+        "normalized_hostname": None,
+        "normalized_path": None,
+        "same_origin": False,
+        "canonical_video_id_preserved": False,
+        "default_port": False,
+        "userinfo_present": False,
+        "terminal_class": "other",
+    }
+
+
+def test_redirect_response_retains_only_one_sanitized_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    location = f"/watch?v={FIXED_VIDEO_ID}&secret=discarded#fragment"
+
+    class Response:
+        status_code = 302
+        url = FIXED_VIDEO_URL
+        headers = {
+            "location": location,
+            "content-type": "text/html",
+            "content-encoding": "identity",
+        }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def iter_raw(self):
+            yield b"redirect"
+
+    class Client:
+        def __init__(self, **options):
+            assert options["follow_redirects"] is False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def stream(self, method, url):
+            assert (method, url) == ("GET", FIXED_VIDEO_URL)
+            return Response()
+
+    monkeypatch.setattr("cfwarp_service_eval.youtube_unlock.httpx.Client", Client)
+
+    result = check_watch_player(config(tmp_path))
+
+    assert result["outcome"] == "unexpected_content"
+    assert result["diagnostics"]["redirect"] == sanitized_redirect(
+        302, FIXED_VIDEO_URL, location
+    )
+    serialized = json.dumps(result["diagnostics"]["redirect"])
+    assert FIXED_VIDEO_ID not in serialized
+    assert "secret" not in serialized
+    assert "discarded" not in serialized
+    assert "location" not in result["diagnostics"]
+
+
+def test_redirect_diagnostic_does_not_change_probe_dependent_verdict(
+    tmp_path: Path, monkeypatch, ready
+) -> None:
+    redirect = sanitized_redirect(302, FIXED_VIDEO_URL, f"/watch?v={FIXED_VIDEO_ID}")
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.check_watch_player",
+        lambda _config: {
+            "outcome": "unexpected_content",
+            "http_status": 302,
+            "diagnostics": {"redirect": redirect},
+        },
+    )
+
+    def challenge(_config, logger):
+        logger.error("Sign in to confirm you’re not a bot")
+        raise DownloadError("extraction failed")
+
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube_unlock.extract_unlock_video", challenge
+    )
+
+    summary, exit_code = run_probe(config(tmp_path))
+
+    assert exit_code == 2
+    assert summary["verdict"] == "probe_dependent"
+    assert summary["observation"]["result"] == {
+        "availability": "unknown",
+        "class": "probe_dependent",
+        "eligible": False,
+    }
+    assert summary["observation"]["probe"]["version"] == "5"
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,7 @@ import importlib.resources
 import hashlib
 import json
 import platform
+import posixpath
 import re
 import signal
 import shutil
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
 import yt_dlp
@@ -43,6 +44,8 @@ PINNED_DENO_VERSION = "2.9.2"
 PINNED_EJS_VERSION = "0.8.0"
 PINNED_YT_DLP_VERSION = "2026.7.4"
 MAX_WATCH_BYTES = 2 * 1024 * 1024
+MAX_REDIRECT_LOCATION_LENGTH = 2_048
+MAX_REDIRECT_PATH_LENGTH = 500
 SERVICE_FAILURES = {
     "bot_challenge",
     "consent_challenge",
@@ -232,6 +235,92 @@ def direct_http_url(value: Any) -> bool:
         return False
     parsed = urlsplit(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def sanitized_redirect(status: int, source_url: str, location: str) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "status": status,
+        "scheme": None,
+        "normalized_hostname": None,
+        "normalized_path": None,
+        "same_origin": False,
+        "canonical_video_id_preserved": False,
+        "default_port": False,
+        "userinfo_present": False,
+        "terminal_class": "other",
+    }
+    if not location or len(location) > MAX_REDIRECT_LOCATION_LENGTH:
+        return record
+    try:
+        source = urlsplit(source_url)
+        target = urlsplit(urljoin(source_url, location))
+        hostname = target.hostname
+        port = target.port
+    except (UnicodeError, ValueError):
+        return record
+    scheme = target.scheme.casefold()
+    record["scheme"] = scheme[:16] or None
+    record["userinfo_present"] = (
+        target.username is not None or target.password is not None
+    )
+    if hostname:
+        try:
+            normalized_hostname = (
+                hostname.rstrip(".").encode("idna").decode("ascii").casefold()
+            )
+        except UnicodeError:
+            normalized_hostname = None
+        if normalized_hostname and len(normalized_hostname) <= 253:
+            record["normalized_hostname"] = normalized_hostname
+    path = target.path or "/"
+    normalized_path = posixpath.normpath("/" + path.lstrip("/"))
+    if path.endswith("/") and normalized_path != "/":
+        normalized_path += "/"
+    if len(normalized_path) <= MAX_REDIRECT_PATH_LENGTH:
+        record["normalized_path"] = normalized_path
+    record["default_port"] = (scheme == "https" and port in {None, 443}) or (
+        scheme == "http" and port in {None, 80}
+    )
+    source_port = source.port or (443 if source.scheme.casefold() == "https" else 80)
+    target_port = port or (443 if scheme == "https" else 80)
+    record["same_origin"] = (
+        source.scheme.casefold() == scheme
+        and source.hostname is not None
+        and record["normalized_hostname"] == source.hostname.rstrip(".").casefold()
+        and source_port == target_port
+    )
+    try:
+        video_ids = parse_qs(
+            target.query, keep_blank_values=True, max_num_fields=20
+        ).get("v")
+    except ValueError:
+        video_ids = None
+    record["canonical_video_id_preserved"] = video_ids == [FIXED_VIDEO_ID]
+
+    host = record["normalized_hostname"]
+    normalized_path = record["normalized_path"]
+    safe_target = record["default_port"] and not record["userinfo_present"]
+    if host == "consent.youtube.com":
+        record["terminal_class"] = "consent"
+    elif host in {
+        "google.com",
+        "www.google.com",
+        "youtube.com",
+        "www.youtube.com",
+    } and (
+        isinstance(normalized_path, str)
+        and (normalized_path == "/sorry" or normalized_path.startswith("/sorry/"))
+    ):
+        record["terminal_class"] = "challenge"
+    elif (
+        safe_target
+        and scheme == "https"
+        and host in {"youtube.com", "www.youtube.com", "m.youtube.com"}
+        and normalized_path == "/watch"
+        and record["canonical_video_id_preserved"]
+    ):
+        record["terminal_class"] = "canonical"
+    return record
 
 
 def select_player_format_evidence(player: dict[str, Any]) -> dict[str, Any]:
@@ -451,6 +540,10 @@ def check_watch_player(config: YouTubeUnlockConfig) -> dict[str, Any]:
                         "body_sha256": f"sha256:{hashlib.sha256(body).hexdigest()}",
                     }
                 )
+                if status in {301, 302, 303, 307, 308}:
+                    diagnostics["redirect"] = sanitized_redirect(
+                        status, final_url, location
+                    )
         text = body.decode("utf-8", errors="replace")
         if 200 <= status < 300:
             try:
@@ -721,9 +814,9 @@ def build_observation(summary: dict[str, Any], observed_at: datetime) -> dict[st
         "scenario_id": "youtube.anonymous_public_video_unlock",
         "probe": {
             "name": "youtube-unlock-multisignal",
-            "version": "4",
+            "version": "5",
             "execution": "local",
-            "methods": ["watch-player-response-v3", "yt-dlp-extractor"],
+            "methods": ["watch-player-response-v4", "yt-dlp-extractor"],
             "tools": summary.get("tools") or {},
             "signals": {
                 "watch_player": (last_attempt.get("independent") or {}).get("outcome"),
