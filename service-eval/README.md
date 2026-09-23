@@ -278,6 +278,12 @@ and writable tmpfs storage; only the observer state directory is persistent.
 The worker must reach the observer over loopback or a node-private endpoint and
 must reach the lane's node-local proxy listener. Cross-host proxy access and
 amd64 emulation are not production configurations.
+For Python probes the worker passes `--worker-mode`, so exit `0` means normal
+finalization even for unavailable or unknown evidence; operator invocation keeps
+exit `2` for a non-passing verdict. Each worker invocation writes an atomically
+published summary in its own directory under group/lane/scenario. The runner
+requires a normal child exit, validates the current Observation, and accounts
+for all attempt directories against the scenario artifact limit before submission.
 
 The isolated ARM64 candidate workflow publishes commit-qualified tags pointing
 to digest-addressed indexes for only those two components. Each index contains

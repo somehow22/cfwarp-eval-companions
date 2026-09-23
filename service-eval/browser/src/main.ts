@@ -31,6 +31,7 @@ interface Options {
   requestedRegion: string | null
   browserProvider: "local" | "agentcore"
   captureScreenshot: boolean
+  workerMode: boolean
 }
 
 export interface Summary {
@@ -118,6 +119,7 @@ export async function main(args: string[]): Promise<number> {
 
   let browser: AgentBrowser | null = null
   let browserAttempts = 0
+  let exitCode = 2
   const browserErrors: string[] = []
   try {
     for (let attempt = 1; attempt <= MAX_BROWSER_ATTEMPTS; attempt++) {
@@ -137,7 +139,7 @@ export async function main(args: string[]): Promise<number> {
           summary.tools.browser_attempts = browserAttempts
           summary.verdict = "tunnel_failure"
           summary.failure_layer = trace.warp === null ? "unknown" : "route-runtime"
-          return await finish(options.output, summary, started, 2)
+          break
         }
 
         const evidence = await browser.observe(
@@ -165,7 +167,8 @@ export async function main(args: string[]): Promise<number> {
         }
         summary.verdict = classification.verdict
         summary.failure_layer = classification.failureLayer
-        return await finish(options.output, summary, started, classification.pass ? 0 : 2)
+        exitCode = classification.pass ? 0 : 2
+        break
       } catch (error) {
         if (error instanceof BrowserNavigationError && attempt === MAX_BROWSER_ATTEMPTS) {
           const navigationFailure = browser
@@ -189,7 +192,7 @@ export async function main(args: string[]): Promise<number> {
           }
           summary.verdict = "network_failure"
           summary.failure_layer = "service-probe"
-          return await finish(options.output, summary, started, 2)
+          break
         }
         await browser?.close()
         browser = null
@@ -203,7 +206,6 @@ export async function main(args: string[]): Promise<number> {
         throw error
       }
     }
-    throw new BrowserCommandError("browser attempts exhausted")
   } catch (error) {
     summary.verdict = error instanceof ProbeDeadlineError
       ? "probe_deadline_exceeded"
@@ -215,11 +217,11 @@ export async function main(args: string[]): Promise<number> {
       error: safeError(error),
       prior_attempt_errors: browserErrors,
     }
-    return await finish(options.output, summary, started, 2)
   } finally {
     await browser?.close()
     await prepared.server?.shutdown()
   }
+  return await finish(options.output, summary, started, options.workerMode ? 0 : exitCode)
 }
 
 function parseArgs(args: string[]): Options {
@@ -241,6 +243,7 @@ function parseArgs(args: string[]): Options {
     "--requested-region",
     "--browser-provider",
     "--capture-screenshot",
+    "--worker-mode",
   ])
   const values = new Map<string, string>()
   for (let index = 0; index < args.length; index += 2) {
@@ -274,6 +277,10 @@ function parseArgs(args: string[]): Options {
   if (captureScreenshotRaw !== "true" && captureScreenshotRaw !== "false") {
     usage("--capture-screenshot must be true or false")
   }
+  const workerModeRaw = values.get("--worker-mode") || "false"
+  if (workerModeRaw !== "true" && workerModeRaw !== "false") {
+    usage("--worker-mode must be true or false")
+  }
   const timestamp = new Date().toISOString().replaceAll(/[-:]/g, "").replace(/\.\d+Z$/, "Z")
   return {
     service: rawService,
@@ -293,6 +300,7 @@ function parseArgs(args: string[]): Options {
     requestedRegion: values.get("--requested-region") || null,
     browserProvider,
     captureScreenshot: captureScreenshotRaw === "true",
+    workerMode: workerModeRaw === "true",
   }
 }
 
@@ -376,7 +384,15 @@ async function finish(
   summary.finished_at = new Date().toISOString()
   summary.elapsed_ms = Date.now() - started.getTime()
   summary.observation = buildObservation(summary)
-  await Deno.writeTextFile(`${output}/summary.json`, `${JSON.stringify(summary, null, 2)}\n`)
+  const temporary = await Deno.makeTempFile({ dir: output, prefix: ".summary-" })
+  try {
+    await Deno.writeTextFile(temporary, `${JSON.stringify(summary, null, 2)}\n`)
+    await Deno.rename(temporary, `${output}/summary.json`)
+  } finally {
+    await Deno.remove(temporary).catch((error) => {
+      if (!(error instanceof Deno.errors.NotFound)) throw error
+    })
+  }
   const trace = summary.trace
   const traceText = trace
     ? `warp=${trace.warp ?? "unknown"} loc=${trace.loc ?? "unknown"} colo=${

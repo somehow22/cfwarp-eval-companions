@@ -89,7 +89,10 @@ listener-facing `warp=on`. It then records a service-specific result:
 
 Exit code `0` means the named scenario's explicit purpose passed. Exit code `2` means a bounded
 failing or inconclusive verdict completed. CI runs classification, type, lint, and format checks
-only; live external services remain on-demand.
+only; live external services remain on-demand. The worker passes `--worker-mode true`: exit `0` then
+means the bounded probe finalized normally, even for unavailable or unknown evidence; a crash still
+exits nonzero. The summary is published with a same-directory atomic rename before the worker
+validates it.
 
 Artifacts are deliberately bounded:
 

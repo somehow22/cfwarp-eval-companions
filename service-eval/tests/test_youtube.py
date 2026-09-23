@@ -4,8 +4,10 @@ import time
 from pathlib import Path
 
 import httpx
+import pytest
 from yt_dlp.utils import DownloadError
 
+from cfwarp_service_eval import artifacts
 from cfwarp_service_eval.youtube import (
     CapturedLogger,
     YouTubeConfig,
@@ -220,6 +222,54 @@ def test_probe_pass_requires_extraction_and_partial_transfer(
     assert observation["egress"]["region"] == "GB"
     assert observation["subject"]["instance_id"] == "test-instance"
     assert observation["fresh_until"] > observation["observed_at"]
+
+
+@pytest.mark.parametrize("failure", ["summary", "verdict"])
+def test_successful_probe_does_not_recover_from_finalization_error(
+    tmp_path: Path, monkeypatch, failure
+) -> None:
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube.check_trace",
+        lambda _config: ({"ok": True, "warp": "on", "location": "GB"}, True),
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube.discover_video",
+        lambda *_args: "https://www.youtube.com/watch?v=current1234",
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube.extract_video",
+        lambda *_args: ({"id": "current1234", "format_count": 1}, {}),
+    )
+    monkeypatch.setattr(
+        "cfwarp_service_eval.youtube.check_partial_transfer",
+        lambda *_args: ({"ok": True}, True),
+    )
+    original_replace = artifacts.os.replace
+    original_write_text = Path.write_text
+    publications = []
+
+    def replace(source, destination):
+        publications.append("summary")
+        if failure == "summary" and len(publications) == 1:
+            raise OSError("one-shot summary publication failure")
+        return original_replace(source, destination)
+
+    def write_text(path, *args, **kwargs):
+        if path.name == "verdict.txt":
+            publications.append("verdict")
+            if failure == "verdict" and publications.count("verdict") == 1:
+                raise OSError("one-shot verdict publication failure")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(artifacts.os, "replace", replace)
+    monkeypatch.setattr(Path, "write_text", write_text)
+    with pytest.raises(OSError, match="one-shot"):
+        run_probe(config(tmp_path))
+    assert publications == (
+        ["summary"] if failure == "summary" else ["summary", "verdict"]
+    )
+    if failure == "verdict":
+        assert json.loads((tmp_path / "summary.json").read_text())["verdict"] == "pass"
 
 
 def test_bot_challenge_is_not_retried(tmp_path: Path, monkeypatch) -> None:

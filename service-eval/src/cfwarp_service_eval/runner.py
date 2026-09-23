@@ -4,11 +4,12 @@ import asyncio
 import json
 import os
 import signal
+import uuid
 from pathlib import Path
 from typing import Any
 
 from .config import DIRECT_THROUGHPUT_FLOOR_MIBPS, SCENARIO_DEFINITIONS, Lane
-from .provenance import observation_v2
+from .provenance import observation_v2, validate_observation_v2
 
 
 class ProbeError(RuntimeError):
@@ -94,8 +95,10 @@ class ProbeRunner:
         return result
 
     async def run(self, group_id: str, lane: Lane, scenario_id: str) -> dict[str, Any]:
-        output = self.artifact_root / group_id / lane.id / scenario_id
-        output.mkdir(parents=True, exist_ok=True)
+        scenario_output = self.artifact_root / group_id / lane.id / scenario_id
+        scenario_output.mkdir(parents=True, exist_ok=True)
+        output = scenario_output / uuid.uuid4().hex
+        output.mkdir(exist_ok=False)
         common = [
             "--proxy",
             lane.proxy,
@@ -132,6 +135,7 @@ class ProbeRunner:
                 *common,
                 "--deadline-seconds",
                 str(scenario_deadline),
+                "--worker-mode",
             ]
             subprocess_deadline = scenario_deadline
         elif scenario_id == "perf":
@@ -143,6 +147,7 @@ class ProbeRunner:
                 str(self.perf_transfer_bytes),
                 "--runs",
                 str(self.perf_runs),
+                "--worker-mode",
             ]
             if lane.composition == "direct-warp":
                 command += ["--floor-mibps", str(DIRECT_THROUGHPUT_FLOOR_MIBPS)]
@@ -162,26 +167,31 @@ class ProbeRunner:
                 str(min(self.deadline_seconds, 300)),
                 "--capture-screenshot",
                 "false",
+                "--worker-mode",
+                "true",
             ]
             if self.browser_execution == "agentcore":
                 command += ["--browser-provider", "agentcore"]
-        await self._run(command, subprocess_deadline, check=False)
-        enforce_artifact_limit(
-            output,
-            int(SCENARIO_DEFINITIONS[scenario_id]["artifact_limit_bytes"]),
-        )
+        await self._run(command, subprocess_deadline)
+        artifact_limit = int(SCENARIO_DEFINITIONS[scenario_id]["artifact_limit_bytes"])
+        enforce_artifact_limit(scenario_output, artifact_limit)
         summary_path = output / "summary.json"
         if not summary_path.is_file():
             raise ProbeError("probe exited without a summary")
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if not isinstance(summary, dict):
+            raise ProbeError("probe summary is not an object")
         observation = summary.get("observation")
         if not isinstance(observation, dict) or observation.get(
             "schema_version"
         ) not in {1, 2}:
             raise ProbeError("probe summary lacks Observation v1")
-        return observation_v2(observation, lane.public(), scenario_id)
+        upgraded = observation_v2(observation, lane.public(), scenario_id)
+        validate_observation_v2(upgraded, lane.public(), scenario_id)
+        enforce_artifact_limit(scenario_output, artifact_limit)
+        return upgraded
 
-    async def _run(self, command: list[str], timeout: int, check: bool = True) -> str:
+    async def _run(self, command: list[str], timeout: int) -> str:
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
@@ -201,7 +211,7 @@ class ProbeRunner:
                 os.killpg(process.pid, signal.SIGKILL)
                 await process.wait()
             raise ProbeError("probe subprocess deadline exceeded") from error
-        if check and process.returncode != 0:
+        if process.returncode != 0:
             message = stderr.decode("utf-8", errors="replace")[-300:]
             raise ProbeError(f"probe subprocess failed: {redact(message)}")
         return stdout.decode("utf-8", errors="replace")[:65536]

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import statistics
 import subprocess
 import uuid
@@ -9,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .artifacts import write_summary
 from .contracts import classify_result
 
 
@@ -146,9 +146,7 @@ def finish(
     )
     summary["observation"] = build_observation(summary, config, finished)
     summary_path = config.output / "summary.json"
-    summary_path.write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_summary(config.output, summary)
     throughput = summary.get("throughput_mibps") or {}
     trace = summary["trace"]
     lines = [

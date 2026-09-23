@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.metadata
-import json
 import platform
 import re
 import shutil
@@ -20,6 +19,7 @@ import httpx
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
+from .artifacts import write_summary
 from .classify import classify_failure
 from .contracts import classify_result
 
@@ -553,7 +553,7 @@ def _run_probe(config: YouTubeConfig) -> tuple[dict[str, Any], int]:
                     else "pass_with_tooling_caveat"
                 )
                 summary["failure_layer"] = None
-                return finish(config.output, summary), 0
+                break
             if transfer.get("error_kind") == "transport_error":
                 summary["verdict"] = "network_failure"
                 summary["failure_layer"] = "unknown"
@@ -574,7 +574,8 @@ def _run_probe(config: YouTubeConfig) -> tuple[dict[str, Any], int]:
             if outcome not in {"network_failure"}:
                 break
 
-    return finish(config.output, summary), 2
+    exit_code = 0 if summary["verdict"] in {"pass", "pass_with_tooling_caveat"} else 2
+    return finish(config.output, summary), exit_code
 
 
 def failure_layer(outcome: str) -> str:
@@ -606,9 +607,7 @@ def finish(output: Path, summary: dict[str, Any]) -> dict[str, Any]:
     summary["elapsed_ms"] = round((finished - started).total_seconds() * 1_000)
     summary["observation"] = build_observation(summary, finished)
     summary_path = output / "summary.json"
-    summary_path.write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_summary(output, summary)
     trace = summary.get("trace") or {}
     lines = [
         f"Service verdict: {summary['verdict']}",

@@ -47,6 +47,7 @@ def parser() -> argparse.ArgumentParser:
     youtube.add_argument("--timeout-seconds", type=float, default=25.0)
     youtube.add_argument("--deadline-seconds", type=float, default=120.0)
     youtube.add_argument("--transfer-bytes", type=int, default=262_144)
+    youtube.add_argument("--worker-mode", action="store_true")
     for flag in PROVENANCE:
         youtube.add_argument(flag)
 
@@ -59,6 +60,7 @@ def parser() -> argparse.ArgumentParser:
     youtube_unlock.add_argument("--attempts", type=int, default=2, choices=range(1, 3))
     youtube_unlock.add_argument("--timeout-seconds", type=float, default=25.0)
     youtube_unlock.add_argument("--deadline-seconds", type=float, default=120.0)
+    youtube_unlock.add_argument("--worker-mode", action="store_true")
     for flag in PROVENANCE:
         youtube_unlock.add_argument(flag)
 
@@ -75,6 +77,7 @@ def parser() -> argparse.ArgumentParser:
         help="omit for evidence-only lanes such as commercial substrates",
     )
     perf.add_argument("--timeout-seconds", type=float, default=60.0)
+    perf.add_argument("--worker-mode", action="store_true")
     for flag in PROVENANCE:
         perf.add_argument(flag)
     return root
@@ -110,7 +113,7 @@ def run_perf(args) -> int:
     )
     _, exit_code = run_perf_probe(config)
     print((config.output / "verdict.txt").read_text(encoding="utf-8"), end="")
-    return exit_code
+    return 0 if args.worker_mode else exit_code
 
 
 def main() -> int:
@@ -142,7 +145,7 @@ def main() -> int:
         )
         _, exit_code = run_youtube_unlock_probe(config)
         print((config.output / "verdict.txt").read_text(encoding="utf-8"), end="")
-        return exit_code
+        return 0 if args.worker_mode else exit_code
     if args.transfer_bytes < 1 or args.transfer_bytes > 4 * 1024 * 1024:
         raise SystemExit("--transfer-bytes must be between 1 and 4194304")
     config = YouTubeConfig(
@@ -166,7 +169,7 @@ def main() -> int:
     )
     summary, exit_code = run_probe(config)
     print((config.output / "verdict.txt").read_text(encoding="utf-8"), end="")
-    return exit_code
+    return 0 if args.worker_mode else exit_code
 
 
 if __name__ == "__main__":

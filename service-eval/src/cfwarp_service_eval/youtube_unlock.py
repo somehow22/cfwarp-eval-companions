@@ -22,6 +22,7 @@ import httpx
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
+from .artifacts import write_summary
 from .classify import classify_failure
 from .contracts import classify_result
 from .youtube import (
@@ -779,9 +780,7 @@ def finish(output: Path, summary: dict[str, Any]) -> dict[str, Any]:
         * 1_000
     )
     summary["observation"] = build_observation(summary, finished)
-    (output / "summary.json").write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_summary(output, summary)
     trace = summary.get("trace") or {}
     (output / "verdict.txt").write_text(
         "\n".join(
